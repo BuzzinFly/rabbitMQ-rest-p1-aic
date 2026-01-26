@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+bin/
+include/
+lib/
+pyvenv.cfg
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Environment secrets
+.env

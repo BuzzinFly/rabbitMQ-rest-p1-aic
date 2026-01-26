@@ -1,0 +1,185 @@
+{
+  "info": {
+    "_postman_id": "c8ed40ed-e4a4-49f3-888f-b47c7ab709e2",
+    "name": "RabbitMQ_Facade",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "1117312"
+  },
+  "item": [
+    {
+      "name": "Publish Message to Queue",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "X-API-KEY",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"TipoEvento\": \"CuentaCreada\",\n  \"Id\": \"fc45534-d5t5d4d-d25drrt34-756fu7657u\",\n  \"LoginNames\": [\"username\"],\n  \"FirstName\": \"Juan Alberto\",\n  \"Surname\": \"Pérez Rodríguez\",\n  \"Email\": \"aaa@bbb.com\",\n  \"MobileNumber\": \"23423423452\",\n  \"IdentityDocument\": \"546654234\",\n  \"IdentityDocumentType\": \"CED-BO\",\n  \"AlumnoIdIntegracion\": \"24525\",\n  \"TrabajadorIdIntegracion\": \"5645\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/publish",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "publish"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Read Messages from Queue",
+      "protocolProfileBehavior": {
+        "disableBodyPruning": true
+      },
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "X-API-KEY",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/users?limit=10&leaseSeconds=60",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events",
+            "users"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "10"
+            },
+            {
+              "key": "leaseSeconds",
+              "value": "60"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Read Message from Queue by ID",
+      "protocolProfileBehavior": {
+        "disableBodyPruning": true
+      },
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "X-API-KEY",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"exchange\": \"\",\n    \"routingKey\": \"new-users\",\n    \"persistent\": true,\n    \"contentType\": \"application/json\",\n    \"payload\": {\n      \"eventId\": \"test-001\",\n      \"eventType\": \"USER_CREATED\",\n      \"occurredAt\": \"2026-01-22T15:00:00Z\",\n      \"externalId\": \"EMP-1001\",\n      \"payload\": {\n        \"givenName\": \"Jane\",\n        \"sn\": \"Doe\",\n        \"employeeId\": \"1001\",\n        \"department\": \"Engineering\"\n      }\n    }\n  }",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/user-events/b9a24973-d8ae-4466-8b63-c283fb33e516",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "user-events",
+            "b9a24973-d8ae-4466-8b63-c283fb33e516"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "ACK Message by ID",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "X-API-KEY",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"eventId\":\"52e695a0-2b67-4965-939c-38123de21707\"}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/ack-by-id",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events",
+            "ack-by-id"
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

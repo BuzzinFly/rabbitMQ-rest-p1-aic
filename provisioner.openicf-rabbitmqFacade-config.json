@@ -1,0 +1,25 @@
+[
+    {
+      "operation": "add",
+      "field": "/configurationProperties",
+      "value": {
+        "scriptRoots": ["/Users/carlos.scott/dev/rabbitMQRest"],
+        "customizerScriptFileName": "CustomizerScript.groovy",
+        "searchScriptFileName": "SearchScript.groovy",
+        "deleteScriptFileName": "DeleteScript.groovy",
+        "createScriptFileName": "CreateScript.groovy",
+
+        "serviceAddress": "http://localhost:8000",
+
+        "defaultRequestHeaders": [
+          "X-API-Key = &{esv.rabbit.facade.api.key}",
+          "Accept = application/json"
+        ],
+
+        "propertyBag": {
+          "limit": 100,
+          "leaseSeconds": 60
+        }
+      }
+    }
+  ]

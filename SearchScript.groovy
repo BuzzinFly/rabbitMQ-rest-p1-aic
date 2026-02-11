@@ -116,7 +116,9 @@ events.each { evt ->
     cob.addAttribute("batchId", batchId)
     cob.addAttribute("data", evt.data)
 
-    rh.handle(cob.build())
+    // handler is a Groovy Closure, call it directly
+    def keepGoing = rh(cob.build())
+    if (keepGoing == false) {
+        return
+    }
 }
-
-return

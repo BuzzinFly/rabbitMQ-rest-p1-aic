@@ -17,8 +17,5 @@ pyvenv.cfg
 # Logs
 *.log
 
-# macOS
-.DS_Store
-
 # Environment secrets
 .env

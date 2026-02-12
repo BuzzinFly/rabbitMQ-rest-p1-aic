@@ -1,91 +1,169 @@
-# Academico ERP REST Facade
+# rabbitMQRest
 
-Small FastAPI service that wraps the ERP Academico API for PingOne AIC. It fetches an OAuth token, calls ERP endpoints, and normalizes responses.
+`rabbitMQRest` is a FastAPI facade that exposes REST endpoints to:
+- Publish messages to RabbitMQ
+- Poll queued messages in batches with a lease
+- ACK or NACK messages after downstream processing
+
+It is designed to work with PingOne AIC / Scripted REST connector flows (Groovy and JS script examples are included in this repo).
 
 ## Requirements
 
 - Python 3.9+
-- Access to ERP token endpoint + ERP API base (or the included mock)
+- Access to a RabbitMQ instance (CloudAMQP or self-managed)
 
-## Configure
-
-Copy the template and fill in real values:
-```
-cp .env.example .env
-```
-
-Key variables:
-- `ERP_TOKEN_URL`
-- `ERP_API_BASE`
-- `ERP_USERNAME`
-- `ERP_PASSWORD`
-- `ERP_CLIENT_ID`
-- `ERP_CLIENT_SECRET`
-- `ERP_HTTP_TIMEOUT_SECONDS` (optional)
-- `ERP_TOKEN_SAFETY_SECONDS` (optional)
-
-## Build / Install Dependencies
+## Build / Install
 
 ### macOS / Linux
-```
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ### Windows (PowerShell)
-```
+```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
+## Configuration
+
+Create a `.env` from the example:
+
+```bash
+cp .env.example .env
+```
+
+Set the following values in `.env`:
+
+- `RABBITMQ_HOST`
+- `RABBITMQ_PORT` (default `5671`)
+- `RABBITMQ_VHOST`
+- `RABBITMQ_USERNAME`
+- `RABBITMQ_PASSWORD`
+- `RABBITMQ_USE_TLS` (`true` for `amqps`, `false` for `amqp`)
+- `QUEUE_NAME` (queue consumed by `/v1/events/users`)
+- `FACADE_API_KEY` (required in `X-API-Key` header)
+- `PREFETCH` (optional, default `200`)
+- `DEFAULT_LEASE_SECONDS` (optional, default `60`)
+
+Optional:
+- `PORT` (default `8080`; use this value when starting `uvicorn`)
+
 ## Run
 
-### Run the facade
-```
-uvicorn academicoErpRestInterface:app --host 0.0.0.0 --port 8080
-```
-
-### (Optional) Run the mock ERP API
-
-The mock server is useful for local testing and matches the default `.env.example` URLs.
-```
-uvicorn mockAcademicoApi:app --host 0.0.0.0 --port 8088
+```bash
+uvicorn rabbitMQRestFacade:app --host 0.0.0.0 --port 8080
 ```
 
-## API Endpoints
+Health check:
 
-Base URL: `http://localhost:8080`
-
-### GET /health
-```
+```bash
 curl http://localhost:8080/health
 ```
 
-### GET /aic/alumnos
-Returns a normalized alumno record.
+## API Usage
 
-Query params:
-- `idAlumno` (required, numeric)
-- `itemsPerPage` (default 10, max 200)
+All protected endpoints require:
 
-Example:
-```
-curl "http://localhost:8080/aic/alumnos?idAlumno=988224&itemsPerPage=10"
+```http
+X-API-Key: <your key>
 ```
 
-### GET /aic/matriculas
-Returns normalized matricula records.
+### 1) Publish message
 
-Query params:
-- `idAlumno` (required)
-- `onlyActive` (default true)
-- `itemsPerPage` (default 50, max 500)
-- `pageIndex` (default 1)
-- `alumnoId` (deprecated alias for `idAlumno`)
+`POST /v1/publish`
 
-Example:
+```bash
+curl -X POST "http://localhost:8080/v1/publish" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: replace_with_api_key" \
+  -d '{
+    "exchange": "",
+    "routingKey": "new-users",
+    "persistent": true,
+    "contentType": "application/json",
+    "payload": {
+      "eventId": "test-001",
+      "eventType": "USER_CREATED",
+      "externalId": "EMP-1001",
+      "payload": {
+        "givenName": "Jane",
+        "sn": "Doe"
+      }
+    }
+  }'
 ```
-curl "http://localhost:8080/aic/matriculas?idAlumno=988224&onlyActive=true&itemsPerPage=50&pageIndex=1"
+
+### 2) Poll messages (reserve with lease)
+
+`GET /v1/events/users?limit=100&leaseSeconds=60`
+
+```bash
+curl "http://localhost:8080/v1/events/users?limit=10&leaseSeconds=60" \
+  -H "X-API-Key: replace_with_api_key"
 ```
+
+Response contains:
+- `batchId`
+- `leaseExpiresAt`
+- `events` as `[{"id":"...","data":{...}}]`
+
+If no messages are available, the API returns `204 No Content`.
+
+### 3) ACK by batch
+
+`POST /v1/events/acks`
+
+```bash
+curl -X POST "http://localhost:8080/v1/events/acks" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: replace_with_api_key" \
+  -d '{"batchId":"b_12345678","eventIds":["event-id-1","event-id-2"]}'
+```
+
+### 4) ACK single event
+
+`POST /v1/events/ack-by-id`
+
+```bash
+curl -X POST "http://localhost:8080/v1/events/ack-by-id" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: replace_with_api_key" \
+  -d '{"eventId":"event-id-1"}'
+```
+
+### 5) NACK by batch
+
+`POST /v1/events/nacks`
+
+```bash
+curl -X POST "http://localhost:8080/v1/events/nacks" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: replace_with_api_key" \
+  -d '{"batchId":"b_12345678","eventIds":["event-id-1"],"requeue":true}'
+```
+
+## Included Connector Scripts
+
+This repo includes Scripted REST connector scripts for PingOne AIC/OpenICF:
+- `SearchScript.groovy` / `rabbitMQFacadeSearch.js` (poll)
+- `DeleteScript.groovy` / `rabbitMQFacadeAckEventsById.js` (ack)
+- `CreateScript.groovy` (publish)
+- `SchemaScript.groovy`
+- `CustomizerScript.groovy`
+
+Default sample connector patch:
+- `provisioner.openicf-rabbitmqFacade-config.json`
+
+## Testing Helpers
+
+- Postman collection: `RabbitMQ_Facade.postman_collection.json`
+- Script payload helper: `make_script_payload.py`
+
+## Logs
+
+The service writes rotating logs to:
+- `facade.log`

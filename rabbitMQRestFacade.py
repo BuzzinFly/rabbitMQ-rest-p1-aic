@@ -8,7 +8,7 @@ import urllib.parse
 import logging
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pika
 from dotenv import load_dotenv
@@ -63,7 +63,7 @@ RABBITMQ_USE_TLS = os.getenv("RABBITMQ_USE_TLS", "true").lower() == "true"
 
 QUEUE_NAME = require_env("QUEUE_NAME")
 PREFETCH = int(os.getenv("PREFETCH", "200"))
-DEFAULT_LEASE_SECONDS = int(os.getenv("DEFAULT_LEASE_SECONDS", "60"))
+DEFAULT_LEASE_SECONDS = int(os.getenv("DEFAULT_LEASE_SECONDS", "5"))
 
 FACADE_API_KEY = require_env("FACADE_API_KEY")
 
@@ -114,22 +114,152 @@ def get_publish_channel():
         return publish_ch
 
 # ----------------------------
+# Helpers
+# ----------------------------
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+def utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+def safe_get_header(properties: pika.BasicProperties, key: str) -> Optional[Any]:
+    try:
+        if properties.headers and key in properties.headers:
+            return properties.headers.get(key)
+    except Exception:
+        return None
+    return None
+
+def coerce_str(x: Any) -> Optional[str]:
+    if x is None:
+        return None
+    if isinstance(x, str):
+        return x
+    try:
+        return str(x)
+    except Exception:
+        return None
+
+# ----------------------------
+# Envelope normalization
+# ----------------------------
+ENVELOPE_FIELDS = {
+    "Action",
+    "DateTime",
+    "Key",
+    "Name",
+    "Application",
+    "Sender",
+    "AccountId",
+    "Content",
+    "ExceptionMessage",
+}
+
+def normalize_to_bus_envelope(payload: Dict[str, Any], properties: pika.BasicProperties) -> Dict[str, Any]:
+    """
+    Normalize inbound payload to your bus envelope schema:
+
+      Action, DateTime, Key, Name, Application, Sender, AccountId, Content, ExceptionMessage
+
+    - If payload already looks like the envelope (has Name and Content), keep it.
+    - If payload is a legacy "data" style event (e.g., includes TipoEvento), wrap it into the envelope.
+    - Content is always a STRING (JSON text) per your schema.
+    """
+    # Case 1: already in envelope form
+    if isinstance(payload, dict) and ("Name" in payload and "Content" in payload):
+        env = {k: payload.get(k) for k in ENVELOPE_FIELDS if k in payload}
+        # Ensure Content is string
+        if not isinstance(env.get("Content"), str):
+            env["Content"] = json.dumps(env.get("Content"), ensure_ascii=False)
+        # Best-effort defaults
+        env.setdefault("Action", payload.get("Action") or "REGISTER")
+        env.setdefault("DateTime", payload.get("DateTime") or utc_now_iso())
+        env.setdefault("Key", payload.get("Key") or coerce_str(properties.correlation_id) or coerce_str(properties.message_id) or str(uuid.uuid4()))
+        return env
+
+    # Case 2: legacy/non-envelope JSON payload -> wrap
+    tipo_evento = payload.get("TipoEvento") if isinstance(payload, dict) else None
+    name = coerce_str(tipo_evento) or coerce_str(payload.get("Name")) or "UnknownEvent"
+
+    # Try to source some metadata from AMQP props / headers, if present.
+    # (These are optional; keep empty if unknown.)
+    application = coerce_str(safe_get_header(properties, "Application")) or coerce_str(payload.get("Application"))
+    sender = coerce_str(safe_get_header(properties, "Sender")) or coerce_str(payload.get("Sender"))
+    account_id = coerce_str(safe_get_header(properties, "AccountId")) or coerce_str(payload.get("AccountId"))
+    key = coerce_str(safe_get_header(properties, "Key")) or coerce_str(properties.correlation_id) or coerce_str(properties.message_id) or str(uuid.uuid4())
+    action = coerce_str(safe_get_header(properties, "Action")) or coerce_str(payload.get("Action")) or "REGISTER"
+    dt = coerce_str(safe_get_header(properties, "DateTime")) or coerce_str(payload.get("DateTime")) or utc_now_iso()
+
+    return {
+        "Action": action,
+        "DateTime": dt,
+        "Key": key,
+        "Name": name,
+        "Application": application,
+        "Sender": sender,
+        "AccountId": account_id,
+        "Content": json.dumps(payload, ensure_ascii=False),
+        "ExceptionMessage": coerce_str(payload.get("ExceptionMessage")),
+    }
+
+def extract_event_type(envelope: Dict[str, Any]) -> str:
+    return coerce_str(envelope.get("Name")) or "UnknownEvent"
+
+def parse_content_json(envelope: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Parse envelope["Content"] (string) into dict when it's valid JSON.
+    If not JSON, return {"raw": <string>}.
+    """
+    c = envelope.get("Content")
+    if not isinstance(c, str):
+        return {"raw": c}
+    try:
+        return json.loads(c)
+    except Exception:
+        return {"raw": c}
+
+def parse_message(body: bytes, properties: pika.BasicProperties) -> Tuple[str, Dict[str, Any]]:
+    """
+    Returns (msg_id, envelope_dict).
+
+    msg_id is the facade _id used for ACK-by-id.
+    """
+    content_type = (properties.content_type or "application/json").lower()
+    body_str = body.decode("utf-8", errors="replace")
+
+    if "json" in content_type:
+        try:
+            payload = json.loads(body_str)
+        except Exception:
+            payload = {"raw": body_str}
+    else:
+        payload = {"raw": body_str}
+
+    # Prefer AMQP message_id if producer set it; else generate one.
+    msg_id = properties.message_id or str(uuid.uuid4())
+
+    # Normalize to bus envelope schema (supports future event types cleanly)
+    if isinstance(payload, dict):
+        envelope = normalize_to_bus_envelope(payload, properties)
+    else:
+        envelope = normalize_to_bus_envelope({"raw": payload}, properties)
+
+    return msg_id, envelope
+
+# ----------------------------
 # Pending store
 # ----------------------------
 @dataclass
 class PendingRecord:
-    # id is internal receipt/id for ACK/NACK and batch tracking
     delivery_tag: int
-    payload: Dict[str, Any]                 # schema-agnostic raw payload
+    envelope: Dict[str, Any]                # normalized bus envelope
     reserved_until_ms: Optional[int] = None
     batch_id: Optional[str] = None
+    event_type: str = "UnknownEvent"
 
-pending: Dict[str, PendingRecord] = {}     # id -> record
-batches: Dict[str, Set[str]] = {}          # batchId -> set(ids)
+pending: Dict[str, PendingRecord] = {}     # _id -> record
+batches: Dict[str, Set[str]] = {}          # batchId -> set(_id)
 lock = threading.RLock()
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
 
 def purge_expired_leases() -> None:
     t = now_ms()
@@ -138,25 +268,6 @@ def purge_expired_leases() -> None:
             if rec.reserved_until_ms is not None and rec.reserved_until_ms <= t:
                 rec.reserved_until_ms = None
                 rec.batch_id = None
-
-def parse_message(body: bytes, properties: pika.BasicProperties) -> (str, Dict[str, Any]):
-    """
-    Parse WITHOUT imposing a schema and WITHOUT injecting extra fields.
-    Returns (msg_id, payload_dict).
-
-    msg_id is used only for ACK/NACK + batch tracking in the facade.
-    """
-    content_type = (properties.content_type or "application/json").lower()
-    body_str = body.decode("utf-8", errors="replace")
-
-    if "json" in content_type:
-        payload = json.loads(body_str)
-    else:
-        payload = {"raw": body_str}
-
-    # Prefer AMQP message_id if producer set it; else generate one.
-    msg_id = properties.message_id or str(uuid.uuid4())
-    return msg_id, payload
 
 # ----------------------------
 # Rabbit consumer thread
@@ -176,19 +287,19 @@ def rabbit_consumer_thread() -> None:
 
     def on_message(ch, method, properties, body):
         try:
-            msg_id, payload = parse_message(body, properties)
+            msg_id, envelope = parse_message(body, properties)
+            event_type = extract_event_type(envelope)
 
             with lock:
-                # If duplicate msg_id appears, keep the first one (or overwrite).
-                # Overwrite is okay because delivery_tag is what matters for ack.
                 pending[msg_id] = PendingRecord(
                     delivery_tag=method.delivery_tag,
-                    payload=payload,
+                    envelope=envelope,
                     reserved_until_ms=None,
                     batch_id=None,
+                    event_type=event_type,
                 )
 
-            logger.info("Received message id=%s deliveryTag=%s", msg_id, method.delivery_tag)
+            logger.info("Received message _id=%s type=%s deliveryTag=%s", msg_id, event_type, method.delivery_tag)
         except Exception:
             logger.exception("Failed to parse message; nack requeue=false (DLQ if configured)")
             ch.basic_nack(delivery_tag=method.delivery_tag, multiple=False, requeue=False)
@@ -226,7 +337,6 @@ class PublishRequest(BaseModel):
     payload: Dict[str, Any]
     contentType: str = "application/json"
     persistent: bool = True
-    # Optional: allow setting AMQP message_id without altering payload
     messageId: Optional[str] = None
     headers: Optional[Dict[str, Any]] = None
 
@@ -250,7 +360,7 @@ class NackRequest(BaseModel):
 # ----------------------------
 # FastAPI app
 # ----------------------------
-app = FastAPI(title="RabbitMQ Facade (poll/ack)", version="1.0.0")
+app = FastAPI(title="RabbitMQ Facade (poll/ack)", version="1.1.0")
 
 @app.on_event("startup")
 def startup():
@@ -263,47 +373,73 @@ def startup():
 @app.get("/health")
 def health():
     with lock:
-        return {"ok": True, "pending": len(pending)}
+        # Include counts by event type (helps operationally)
+        by_type: Dict[str, int] = {}
+        for rec in pending.values():
+            by_type[rec.event_type] = by_type.get(rec.event_type, 0) + 1
+        return {"ok": True, "pending": len(pending), "byType": by_type}
 
 @app.get("/v1/events/users", response_model=None)
 def get_user_events(
     limit: int = Query(default=100, ge=1, le=500),
     leaseSeconds: int = Query(default=DEFAULT_LEASE_SECONDS, ge=5, le=300),
+
+    # Focus on CuentaModificada now, but extensible: pass eventName later for other types
+    eventName: Optional[str] = Query(default="CuentaModificada"),
+
+    # Backward compatibility / convenience:
+    # - includeData=true returns parsed Content as "data" (object) alongside the envelope.
+    includeData: bool = Query(default=True),
+
     _: None = Depends(require_api_key),
 ):
     purge_expired_leases()
 
     batch_id = "b_" + uuid.uuid4().hex[:8]
     lease_expires_ms = now_ms() + leaseSeconds * 1000
-    lease_expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(lease_expires_ms / 1000.0))
 
-    events: List[Dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
 
     with lock:
         for event_id, rec in pending.items():
-            if len(events) >= limit:
+            if len(results) >= limit:
                 break
             if rec.reserved_until_ms is not None:
                 continue  # already reserved
+            if eventName and rec.event_type != eventName:
+                continue  # filter by type
 
             rec.reserved_until_ms = lease_expires_ms
             rec.batch_id = batch_id
-
             batches.setdefault(batch_id, set()).add(event_id)
 
-            # Return schema-agnostic payload, with id out-of-band
-            events.append({"id": event_id, "data": rec.payload})
+            item: Dict[str, Any] = {
+                "_id": event_id,          # keep _id for ACK-by-id
+                "__NAME__": event_id,     # keeps older connector expectations happy
+                "batchId": batch_id,
+                # Bus envelope fields:
+                **rec.envelope,
+            }
 
-    if not events:
+            # Convenience: parsed JSON version of Content (matches your earlier "data" style)
+            if includeData:
+                item["data"] = parse_content_json(rec.envelope)
+
+            results.append(item)
+
+    if not results:
         return Response(status_code=204)
 
-    logger.info("Issued batch=%s events=%d leaseSeconds=%d", batch_id, len(events), leaseSeconds)
+    logger.info("Issued batch=%s results=%d leaseSeconds=%d eventName=%s", batch_id, len(results), leaseSeconds, eventName)
 
+    # Return in the same top-level shape you previously showed (result/resultCount/etc.)
     return {
-        "batchId": batch_id,
-        "leaseExpiresAt": lease_expires_at,
-        "nextCursor": None,
-        "events": events,
+        "result": results,
+        "resultCount": len(results),
+        "pagedResultsCookie": None,
+        "totalPagedResultsPolicy": "NONE",
+        "totalPagedResults": -1,
+        "remainingPagedResults": -1,
     }
 
 @app.post("/v1/publish")
@@ -319,7 +455,6 @@ def publish_message(req: PublishRequest, _: None = Depends(require_api_key)):
             headers=req.headers,
         )
 
-        # Convenience for tests: ensure queue exists if using default exchange
         if req.exchange == "":
             ch.queue_declare(queue=req.routingKey, durable=True)
 
@@ -353,11 +488,7 @@ def ack_events(req: AckRequest, _: None = Depends(require_api_key)):
                 continue
 
             delivery_tag = rec.delivery_tag
-
-            # Schedule ACK on consumer thread
-            schedule_on_consumer_thread(
-                lambda dt=delivery_tag: ch.basic_ack(delivery_tag=dt, multiple=False)
-            )
+            schedule_on_consumer_thread(lambda dt=delivery_tag: ch.basic_ack(delivery_tag=dt, multiple=False))
 
             pending.pop(event_id, None)
             acked.append(event_id)
@@ -382,9 +513,7 @@ def ack_event_by_id(req: AckByIdRequest, _: None = Depends(require_api_key)):
         delivery_tag = rec.delivery_tag
         batch_id = rec.batch_id
 
-        conn.add_callback_threadsafe(
-            lambda dt=delivery_tag: ch.basic_ack(delivery_tag=dt, multiple=False)
-        )
+        conn.add_callback_threadsafe(lambda dt=delivery_tag: ch.basic_ack(delivery_tag=dt, multiple=False))
 
         pending.pop(req.eventId, None)
 
@@ -411,9 +540,7 @@ def nack_events(req: NackRequest, _: None = Depends(require_api_key)):
             delivery_tag = rec.delivery_tag
 
             schedule_on_consumer_thread(
-                lambda dt=delivery_tag, rq=req.requeue: ch.basic_nack(
-                    delivery_tag=dt, multiple=False, requeue=rq
-                )
+                lambda dt=delivery_tag, rq=req.requeue: ch.basic_nack(delivery_tag=dt, multiple=False, requeue=rq)
             )
 
             pending.pop(event_id, None)

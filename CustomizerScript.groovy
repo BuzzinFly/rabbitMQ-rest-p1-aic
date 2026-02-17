@@ -1,19 +1,22 @@
 /**
- * Scripted REST Connector Customizer for 1.5.20.15
+ * Scripted REST Connector Customizer
  *
- * Important: inside customize/init/decorate closures, the delegate is ScriptedRESTConfiguration,
- * so unqualified 'log' is resolved against the configuration and fails.
- * Capture it outside as 'logger'.
+ * Make logging safe: do not assume 'log' is always bound.
  */
-def logger = log
+def logger = null
+try {
+  logger = this.binding?.hasVariable('log') ? this.binding.getVariable('log') : null
+} catch (Exception ignore) {
+  logger = null
+}
 
 customize {
   init { httpClientBuilder ->
-    logger.info("[rabbitmqFacade][CUSTOMIZER] init() called")
+    try { logger?.info("[rabbitmqFacade][CUSTOMIZER] init() called") } catch (Exception ignore) {}
   }
 
   decorate { httpClient ->
-    logger.info("[rabbitmqFacade][CUSTOMIZER] decorate() called; returning provided httpClient")
+    try { logger?.info("[rabbitmqFacade][CUSTOMIZER] decorate() called; returning provided httpClient") } catch (Exception ignore) {}
     return httpClient
   }
 }

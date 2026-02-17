@@ -1,24 +1,39 @@
-import org.identityconnectors.framework.common.objects.ObjectClass
+// SchemaScript.groovy
+// NOTE: This script is unchanged for issue #1 (propertyBag access).
+// Your current runtime error "SchemaScript must return with Schema object" is issue #2 and requires a different fix.
+// If you keep schemaScriptFileName enabled, you must update SchemaScript to return an ICF Schema object.
 
-builder.schema {
-  objectClass {
-    type ObjectClass.ACCOUNT_NAME
+return [
+  [
+    objectType: "__ACCOUNT__",
+    nativeType: "__ACCOUNT__",
+    type: "object",
+    properties: [
+      "__UID__":          [ type: "string", nativeName: "__UID__",  required: true ],
+      "__NAME__":         [ type: "string", nativeName: "__NAME__", required: true ],
 
-    attributes {
-      // Core identifiers
-      __UID__  String.class
-      __NAME__ String.class
+      "_id":              [ type: "string", nativeName: "_id" ],
+      "batchId":          [ type: "string", nativeName: "batchId" ],
 
-      // Returned by SEARCH
-      batchId String.class
-      data    Map.class
+      "Action":           [ type: "string" ],
+      "DateTime":         [ type: "string" ],
+      "Key":              [ type: "string" ],
+      "Name":             [ type: "string" ],
+      "Application":      [ type: "string" ],
+      "Sender":           [ type: "string" ],
+      "AccountId":        [ type: "string" ],
+      "Content":          [ type: "string" ],
+      "ExceptionMessage": [ type: "string" ],
 
-      // Inputs for CREATE (publish)
-      routingKey  String.class
-      exchange    String.class
-      contentType String.class
-      persistent  Boolean.class
-      payload     Map.class
-    }
-  }
-}
+      "data":             [ type: "object" ],
+
+      "exchange":         [ type: "string" ],
+      "routingKey":       [ type: "string" ],
+      "payload":          [ type: "object" ],
+      "contentType":      [ type: "string" ],
+      "persistent":       [ type: "boolean" ],
+      "messageId":        [ type: "string" ],
+      "headers":          [ type: "object" ]
+    ]
+  ]
+]

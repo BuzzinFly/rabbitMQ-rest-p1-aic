@@ -1,25 +1,140 @@
-[
-    {
-      "operation": "add",
-      "field": "/configurationProperties",
-      "value": {
-        "scriptRoots": ["/Users/carlos.scott/dev/rabbitMQRest"],
-        "customizerScriptFileName": "CustomizerScript.groovy",
-        "searchScriptFileName": "SearchScript.groovy",
-        "deleteScriptFileName": "DeleteScript.groovy",
+{
+    "_id": "provisioner.openicf/rabbitmqFacade",
+    "configurationProperties": {
         "createScriptFileName": "CreateScript.groovy",
-
-        "serviceAddress": "http://localhost:8000",
-
+        "customizerScriptFileName": "CustomizerScript.groovy",
         "defaultRequestHeaders": [
-          "X-API-Key = &{esv.rabbit.facade.api.key}",
-          "Accept = application/json"
+            "Accept=application/json"
         ],
-
+        "deleteScriptFileName": "DeleteScript.groovy",
+        "password": "&{esv.rabbitmq.interface.api.key}",
         "propertyBag": {
-          "limit": 100,
-          "leaseSeconds": 60
+            "eventName": "CuentaModificada",
+            "includeData": true,
+            "leaseSeconds": 10,
+            "limit": 100,
+            "queueName": "cs-baseline"
+        },
+        "readScriptFileName": "ReadScript.groovy",
+        "scriptRoots": [
+            "/Users/carlos.scott/dev/rabbitMQRest/"
+        ],
+        "searchScriptFileName": "SearchScript.groovy",
+        "serviceAddress": "http://localhost:8000",
+        "username": "NA"
+    },
+    "connectorRef": {
+        "bundleName": "org.forgerock.openicf.connectors.scriptedrest-connector",
+        "bundleVersion": "1.5.20.32",
+        "connectorHostRef": "macbook-rcs",
+        "connectorName": "org.forgerock.openicf.connectors.scriptedrest.ScriptedRESTConnector",
+        "systemType": "provisioner.openicf"
+    },
+    "enabled": true,
+    "name": "rabbitMq",
+    "objectTypes": {
+        "account": {
+            "$schema": "http://json-schema.org/draft-03/schema",
+            "id": "__ACCOUNT__",
+            "nativeType": "__ACCOUNT__",
+            "properties": {
+                "AccountId": {
+                    "nativeName": "AccountId",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "Action": {
+                    "nativeName": "Action",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "Application": {
+                    "nativeName": "Application",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "Content": {
+                    "nativeName": "Content",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "DateTime": {
+                    "nativeName": "DateTime",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "ExceptionMessage": {
+                    "nativeName": "ExceptionMessage",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "Key": {
+                    "nativeName": "Key",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "Name": {
+                    "nativeName": "Name",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "Sender": {
+                    "nativeName": "Sender",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "__NAME__": {
+                    "nativeName": "__NAME__",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "__UID__": {
+                    "nativeName": "__UID__",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "_id": {
+                    "nativeName": "_id",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "batchId": {
+                    "nativeName": "batchId",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "contentType": {
+                    "nativeName": "contentType",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "data": {
+                    "nativeName": "data",
+                    "nativeType": "object",
+                    "type": "object"
+                },
+                "exchange": {
+                    "nativeName": "exchange",
+                    "nativeType": "string",
+                    "type": "string"
+                },
+                "payload": {
+                    "nativeName": "payload",
+                    "nativeType": "object",
+                    "type": "object"
+                },
+                "persistent": {
+                    "nativeName": "persistent",
+                    "nativeType": "boolean",
+                    "type": "boolean"
+                },
+                "routingKey": {
+                    "nativeName": "routingKey",
+                    "nativeType": "string",
+                    "type": "string"
+                }
+            },
+            "type": "object"
         }
-      }
     }
-  ]
+}

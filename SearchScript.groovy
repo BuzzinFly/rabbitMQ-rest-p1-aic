@@ -1,96 +1,91 @@
+// SearchScript.groovy (DROP-IN)
+// Uses the OpenICF "handler" callback (Closure) to emit results one-by-one.
+
 import groovy.json.JsonSlurper
-import org.identityconnectors.framework.common.objects.ObjectClass
-import org.identityconnectors.framework.common.objects.ConnectorObjectBuilder
-
-import org.apache.http.client.methods.HttpGet
-import org.apache.http.util.EntityUtils
-
+import java.nio.charset.StandardCharsets
+import java.net.HttpURLConnection
 import java.net.URLEncoder
 
-def logger = log
-
-// Only ACCOUNT supported
-if (objectClass != ObjectClass.ACCOUNT) {
-    return
+def getApiKey() {
+    def gs = configuration.password  // GuardedString
+    if (gs == null) throw new IllegalStateException("configuration.password (GuardedString API key) is required")
+    def apiKey = null
+    gs.access({ chars -> apiKey = new String(chars) } as org.identityconnectors.common.security.GuardedString.Accessor)
+    return apiKey
 }
 
-def limit = (configuration.propertyBag?.limit ?: 100) as Integer
-def leaseSeconds = (configuration.propertyBag?.leaseSeconds ?: 60) as Integer
+def httpGet(String urlStr, Map<String, String> headers = [:]) {
+    HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection()
+    conn.setRequestMethod("GET")
+    conn.setConnectTimeout(15000)
+    conn.setReadTimeout(30000)
+    headers.each { k, v -> conn.setRequestProperty(k, v) }
 
-def base = (configuration.serviceAddress ?: "").toString().trim()
-if (!base) {
-    throw new RuntimeException("serviceAddress is empty in configurationProperties")
-}
-if (base.endsWith("/")) {
-    base = base.substring(0, base.length() - 1)
-}
-
-// Build URL with query string
-def qs = "limit=" + URLEncoder.encode(limit.toString(), "UTF-8") +
-        "&leaseSeconds=" + URLEncoder.encode(leaseSeconds.toString(), "UTF-8")
-def url = base + "/v1/events/users?" + qs
-
-def req = new HttpGet(url)
-req.setHeader("Accept", "application/json")
-
-// API key from configuration.password (GuardedString)
-def apiKey = ""
-def pw = configuration.password
-if (pw != null) {
-    pw.access { chars -> apiKey = new String(chars) }
-}
-apiKey = (apiKey ?: "").trim()
-if (!apiKey) {
-    throw new RuntimeException("API key is empty in configuration.password")
-}
-req.setHeader("x-api-key", apiKey)
-
-// Execute request using Apache HttpClient
-def resp = connection.execute(req)
-def status = resp.getStatusLine().getStatusCode()
-
-if (status == 204) {
-    EntityUtils.consumeQuietly(resp.getEntity())
-    return
-}
-
-def entity = resp.getEntity()
-def bodyText = entity != null ? EntityUtils.toString(entity, "UTF-8") : ""
-EntityUtils.consumeQuietly(entity)
-
-if (status < 200 || status >= 300) {
-    throw new RuntimeException("Facade returned status=" + status + " body=" + bodyText)
-}
-if (!bodyText) {
-    return
-}
-
-def body = new JsonSlurper().parseText(bodyText)
-def batchId = body?.batchId
-def events = body?.events ?: []
-
-// Emit connector objects back to IDM via the injected handler (Closure in this runtime)
-def rh = handler
-
-events.each { evt ->
-    def id = (evt.id ?: evt.eventId)?.toString()
-    if (!id) {
-        return
+    int code = conn.getResponseCode()
+    String body = null
+    if (code >= 200 && code < 300) {
+        body = conn.getInputStream().getText(StandardCharsets.UTF_8.name())
+    } else if (code == 204) {
+        body = null
+    } else {
+        def err = conn.getErrorStream()
+        def errBody = err ? err.getText(StandardCharsets.UTF_8.name()) : ""
+        throw new RuntimeException("HTTP ${code} GET ${urlStr} failed: ${errBody}")
     }
+    return [code: code, body: body]
+}
 
-    def cob = new ConnectorObjectBuilder()
-    cob.setObjectClass(ObjectClass.ACCOUNT)
-    cob.setUid(id)
-    cob.setName(id)
+def baseUrl = (configuration.serviceAddress ?: "").toString().replaceAll("/+\$", "")
+if (!baseUrl) throw new IllegalStateException("configuration.serviceAddress is required")
 
-    cob.addAttribute("batchId", batchId)
-    cob.addAttribute("data", evt.data)
+def bag = configuration.propertyBag ?: [:]
+def limit = ((bag.limit ?: 100) as int)
+def leaseSeconds = ((bag.leaseSeconds ?: 10) as int)
+def eventName = (bag.eventName ?: "CuentaModificada").toString()
+def includeData = (bag.includeData != null) ? (bag.includeData as boolean) : true
 
-    // handler is a Closure; call it. Some runtimes return false to stop iteration.
-    def keepGoing = rh.call(cob.build())
-    if (keepGoing == false) {
-        return
+def apiKey = getApiKey()
+
+def qs = "limit=${limit}&leaseSeconds=${leaseSeconds}&eventName=${URLEncoder.encode(eventName, 'UTF-8')}&includeData=${includeData}"
+def url = "${baseUrl}/v1/events/users?${qs}"
+
+def resp = httpGet(url, [
+    "X-API-Key": apiKey,
+    "Accept": "application/json"
+])
+
+if (resp.code == 204 || resp.body == null || resp.body.trim().isEmpty()) return null
+
+def parsed = new JsonSlurper().parseText(resp.body)
+def items = (parsed?.result instanceof List) ? parsed.result : []
+
+// Only emit business attributes (not __UID__/__NAME__ identifiers)
+def allowed = [
+  "AccountId","Action","Application","Content","DateTime","ExceptionMessage",
+  "Key","Name","Sender","batchId","contentType","exchange","routingKey","persistent","data","_id"
+] as Set
+
+items.each { ev ->
+    if (!(ev instanceof Map)) return
+
+    def uidVal = (ev._id ?: ev.__UID__ ?: ev.id)?.toString()
+    if (!uidVal) return
+
+    def nameVal = (ev.__NAME__ ?: uidVal)?.toString()
+
+    handler {
+        uid uidVal
+        id  nameVal
+
+        ev.each { k, v ->
+            def key = k?.toString()
+            if (key && v != null && allowed.contains(key)) {
+                attribute key, v
+            }
+        }
+
+        attribute "_id", uidVal
     }
 }
 
-return
+return null

@@ -7,7 +7,7 @@
   },
   "item": [
     {
-      "name": "Publish Message to Queue",
+      "name": "Publish Message",
       "request": {
         "method": "POST",
         "header": [
@@ -17,14 +17,14 @@
             "type": "text"
           },
           {
-            "key": "X-API-KEY",
+            "key": "X-API-Key",
             "value": "{{facadeAPIKey}}",
             "type": "text"
           }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"TipoEvento\": \"CuentaCreada\",\n  \"Id\": \"fc45534-d5t5d4d-d25drrt34-756fu7657u\",\n  \"LoginNames\": [\"username\"],\n  \"FirstName\": \"Juan Alberto\",\n  \"Surname\": \"Pérez Rodríguez\",\n  \"Email\": \"aaa@bbb.com\",\n  \"MobileNumber\": \"23423423452\",\n  \"IdentityDocument\": \"546654234\",\n  \"IdentityDocumentType\": \"CED-BO\",\n  \"AlumnoIdIntegracion\": \"24525\",\n  \"TrabajadorIdIntegracion\": \"5645\"\n}",
+          "raw": "{\n  \"exchange\": \"\",\n  \"routingKey\": \"cs-baseline\",\n  \"persistent\": true,\n  \"contentType\": \"application/json\",\n  \"payload\": {\n    \"Name\": \"CuentaModificada\",\n    \"Action\": \"UPDATE\",\n    \"Application\": \"PingOneAIC\",\n    \"Sender\": \"PingOneAIC\",\n    \"AccountId\": \"24525\",\n    \"Content\": \"{\\\"idAlumno\\\":\\\"24525\\\",\\\"status\\\":\\\"ACTIVE\\\"}\"\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -32,7 +32,8 @@
           }
         },
         "url": {
-          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/publish",
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/publish",
+          "protocol": "http",
           "host": [
             "{{facadeHost}}"
           ],
@@ -47,9 +48,6 @@
     },
     {
       "name": "Read Messages from Queue",
-      "protocolProfileBehavior": {
-        "disableBodyPruning": true
-      },
       "request": {
         "method": "GET",
         "header": [
@@ -59,22 +57,14 @@
             "type": "text"
           },
           {
-            "key": "X-API-KEY",
+            "key": "X-API-Key",
             "value": "{{facadeAPIKey}}",
             "type": "text"
           }
         ],
-        "body": {
-          "mode": "raw",
-          "raw": "",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
         "url": {
-          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/users?limit=10&leaseSeconds=60",
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/users?limit=10&leaseSeconds=10&eventName=CuentaModificada&includeData=true",
+          "protocol": "http",
           "host": [
             "{{facadeHost}}"
           ],
@@ -91,51 +81,16 @@
             },
             {
               "key": "leaseSeconds",
-              "value": "60"
+              "value": "10"
+            },
+            {
+              "key": "eventName",
+              "value": "CuentaModificada"
+            },
+            {
+              "key": "includeData",
+              "value": "true"
             }
-          ]
-        }
-      },
-      "response": []
-    },
-    {
-      "name": "Read Message from Queue by ID",
-      "protocolProfileBehavior": {
-        "disableBodyPruning": true
-      },
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          },
-          {
-            "key": "X-API-KEY",
-            "value": "{{facadeAPIKey}}",
-            "type": "text"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n    \"exchange\": \"\",\n    \"routingKey\": \"new-users\",\n    \"persistent\": true,\n    \"contentType\": \"application/json\",\n    \"payload\": {\n      \"eventId\": \"test-001\",\n      \"eventType\": \"USER_CREATED\",\n      \"occurredAt\": \"2026-01-22T15:00:00Z\",\n      \"externalId\": \"EMP-1001\",\n      \"payload\": {\n        \"givenName\": \"Jane\",\n        \"sn\": \"Doe\",\n        \"employeeId\": \"1001\",\n        \"department\": \"Engineering\"\n      }\n    }\n  }",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "url": {
-          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/user-events/b9a24973-d8ae-4466-8b63-c283fb33e516",
-          "host": [
-            "{{facadeHost}}"
-          ],
-          "port": "{{facadePort}}",
-          "path": [
-            "{{facadeAPIVersion}}",
-            "user-events",
-            "b9a24973-d8ae-4466-8b63-c283fb33e516"
           ]
         }
       },
@@ -152,14 +107,14 @@
             "type": "text"
           },
           {
-            "key": "X-API-KEY",
+            "key": "X-API-Key",
             "value": "{{facadeAPIKey}}",
             "type": "text"
           }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\"eventId\":\"52e695a0-2b67-4965-939c-38123de21707\"}",
+          "raw": "{\"eventId\":\"replace-with-event-id\"}",
           "options": {
             "raw": {
               "language": "json"
@@ -167,7 +122,8 @@
           }
         },
         "url": {
-          "raw": "{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/ack-by-id",
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/ack-by-id",
+          "protocol": "http",
           "host": [
             "{{facadeHost}}"
           ],
@@ -180,6 +136,106 @@
         }
       },
       "response": []
+    },
+    {
+      "name": "ACK Batch",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"batchId\": \"b_12345678\",\n  \"eventIds\": [\"event-id-1\", \"event-id-2\"]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/acks",
+          "protocol": "http",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events",
+            "acks"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "NACK Batch",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"batchId\": \"b_12345678\",\n  \"eventIds\": [\"event-id-1\"],\n  \"requeue\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/nacks",
+          "protocol": "http",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events",
+            "nacks"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "facadeHost",
+      "value": "localhost"
+    },
+    {
+      "key": "facadePort",
+      "value": "8000"
+    },
+    {
+      "key": "facadeAPIVersion",
+      "value": "v1"
+    },
+    {
+      "key": "facadeAPIKey",
+      "value": "replace_with_api_key"
     }
   ]
 }

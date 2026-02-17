@@ -1,18 +1,27 @@
 # rabbitMQRest
 
-`rabbitMQRest` is a FastAPI facade that exposes REST endpoints to:
-- Publish messages to RabbitMQ
-- Poll queued messages in batches with a lease
-- ACK or NACK messages after downstream processing
+`rabbitMQRest` is a FastAPI facade over RabbitMQ for PingOne AIC/OpenICF Scripted REST flows.
 
-It is designed to work with PingOne AIC / Scripted REST connector flows (Groovy and JS script examples are included in this repo).
+It supports:
+- Publishing messages (`/v1/publish`)
+- Polling messages with lease reservation (`/v1/events/users`)
+- Acknowledging by batch or by id (`/v1/events/acks`, `/v1/events/ack-by-id`)
+- Negative acknowledgements (`/v1/events/nacks`)
+
+## Current architecture
+
+- A background consumer thread pulls from `QUEUE_NAME` with manual ack and configurable prefetch.
+- Messages are normalized into a bus envelope with fields:
+  `Action`, `DateTime`, `Key`, `Name`, `Application`, `Sender`, `AccountId`, `Content`, `ExceptionMessage`
+- `/v1/events/users` returns OpenICF-friendly objects including `_id`, `__NAME__`, `batchId`, and envelope attributes.
+- Leases are in-memory only (process restart clears pending/lease state).
 
 ## Requirements
 
 - Python 3.9+
-- Access to a RabbitMQ instance (CloudAMQP or self-managed)
+- Reachable RabbitMQ broker (CloudAMQP or self-managed)
 
-## Build / Install
+## Build
 
 ### macOS / Linux
 ```bash
@@ -28,142 +37,153 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Configuration
+## Runtime configuration (`.env`)
 
-Create a `.env` from the example:
+Create env file:
 
 ```bash
 cp .env.example .env
 ```
 
-Set the following values in `.env`:
-
+Required:
 - `RABBITMQ_HOST`
-- `RABBITMQ_PORT` (default `5671`)
 - `RABBITMQ_VHOST`
 - `RABBITMQ_USERNAME`
 - `RABBITMQ_PASSWORD`
-- `RABBITMQ_USE_TLS` (`true` for `amqps`, `false` for `amqp`)
-- `QUEUE_NAME` (queue consumed by `/v1/events/users`)
-- `FACADE_API_KEY` (required in `X-API-Key` header)
-- `PREFETCH` (optional, default `200`)
-- `DEFAULT_LEASE_SECONDS` (optional, default `60`)
+- `QUEUE_NAME`
+- `FACADE_API_KEY`
 
-Optional:
-- `PORT` (default `8080`; use this value when starting `uvicorn`)
+Optional (with defaults from `rabbitMQRestFacade.py`):
+- `PORT` default `8080` (set to `8000` to match examples below)
+- `RABBITMQ_PORT` default `5671`
+- `RABBITMQ_USE_TLS` default `true`
+- `PREFETCH` default `200`
+- `DEFAULT_LEASE_SECONDS` default `5`
 
 ## Run
 
 ```bash
-uvicorn rabbitMQRestFacade:app --host 0.0.0.0 --port 8080
+uvicorn rabbitMQRestFacade:app --host 0.0.0.0 --port 8000
 ```
 
 Health check:
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8000/health
 ```
 
-## API Usage
+## API usage
 
 All protected endpoints require:
 
 ```http
-X-API-Key: <your key>
+X-API-Key: <FACADE_API_KEY>
 ```
 
-### 1) Publish message
+### Publish
 
 `POST /v1/publish`
 
 ```bash
-curl -X POST "http://localhost:8080/v1/publish" \
+curl -X POST "http://localhost:8000/v1/publish" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: replace_with_api_key" \
   -d '{
     "exchange": "",
-    "routingKey": "new-users",
+    "routingKey": "cs-baseline",
     "persistent": true,
     "contentType": "application/json",
     "payload": {
-      "eventId": "test-001",
-      "eventType": "USER_CREATED",
-      "externalId": "EMP-1001",
-      "payload": {
-        "givenName": "Jane",
-        "sn": "Doe"
-      }
+      "Name": "CuentaModificada",
+      "Action": "UPDATE",
+      "Application": "PingOneAIC",
+      "Sender": "PingOneAIC",
+      "AccountId": "24525",
+      "Content": "{\"idAlumno\":\"24525\",\"status\":\"ACTIVE\"}"
     }
   }'
 ```
 
-### 2) Poll messages (reserve with lease)
+### Poll (lease + filter)
 
-`GET /v1/events/users?limit=100&leaseSeconds=60`
+`GET /v1/events/users?limit=100&leaseSeconds=10&eventName=CuentaModificada&includeData=true`
 
 ```bash
-curl "http://localhost:8080/v1/events/users?limit=10&leaseSeconds=60" \
+curl "http://localhost:8000/v1/events/users?limit=10&leaseSeconds=10&eventName=CuentaModificada&includeData=true" \
   -H "X-API-Key: replace_with_api_key"
 ```
 
-Response contains:
-- `batchId`
-- `leaseExpiresAt`
-- `events` as `[{"id":"...","data":{...}}]`
+Notes:
+- `eventName` defaults to `CuentaModificada`
+- `includeData=true` adds parsed JSON from `Content` into `data`
+- returns `204` when no events are available
 
-If no messages are available, the API returns `204 No Content`.
-
-### 3) ACK by batch
+### ACK batch
 
 `POST /v1/events/acks`
 
 ```bash
-curl -X POST "http://localhost:8080/v1/events/acks" \
+curl -X POST "http://localhost:8000/v1/events/acks" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: replace_with_api_key" \
   -d '{"batchId":"b_12345678","eventIds":["event-id-1","event-id-2"]}'
 ```
 
-### 4) ACK single event
+### ACK by id
 
 `POST /v1/events/ack-by-id`
 
 ```bash
-curl -X POST "http://localhost:8080/v1/events/ack-by-id" \
+curl -X POST "http://localhost:8000/v1/events/ack-by-id" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: replace_with_api_key" \
   -d '{"eventId":"event-id-1"}'
 ```
 
-### 5) NACK by batch
+### NACK batch
 
 `POST /v1/events/nacks`
 
 ```bash
-curl -X POST "http://localhost:8080/v1/events/nacks" \
+curl -X POST "http://localhost:8000/v1/events/nacks" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: replace_with_api_key" \
   -d '{"batchId":"b_12345678","eventIds":["event-id-1"],"requeue":true}'
 ```
 
-## Included Connector Scripts
+## OpenICF / PingOne AIC configuration
 
-This repo includes Scripted REST connector scripts for PingOne AIC/OpenICF:
-- `SearchScript.groovy` / `rabbitMQFacadeSearch.js` (poll)
-- `DeleteScript.groovy` / `rabbitMQFacadeAckEventsById.js` (ack)
-- `CreateScript.groovy` (publish)
-- `SchemaScript.groovy`
-- `CustomizerScript.groovy`
-
-Default sample connector patch:
+Sample connector config:
 - `provisioner.openicf-rabbitmqFacade-config.json`
 
-## Testing Helpers
+Important fields:
+- `serviceAddress`: base URL for facade (sample currently uses `http://localhost:8000`)
+- `password`: GuardedString that stores `FACADE_API_KEY`
+- `propertyBag.queueName`: default routing key used by `CreateScript.groovy`
+- `propertyBag.eventName`: poll filter used by `SearchScript.groovy` (`CuentaModificada`)
+- `propertyBag.limit`, `propertyBag.leaseSeconds`, `propertyBag.includeData`
 
-- Postman collection: `RabbitMQ_Facade.postman_collection.json`
-- Script payload helper: `make_script_payload.py`
+Scripts in use:
+- `CreateScript.groovy` publish + transform to legacy bus payload shape
+- `SearchScript.groovy` poll + emit connector attributes
+- `DeleteScript.groovy` ACK-by-id
+- `ReadScript.groovy` read-by-id script
+- `TestScript.groovy` health check
+- `CustomizerScript.groovy` HTTP client customization hooks
+- `SchemaScript.groovy` schema script stub
+
+## Important compatibility note
+
+- `ReadScript.groovy` references `GET /v1/user-events/{id}`.
+- That endpoint is not currently implemented in `rabbitMQRestFacade.py`.
+- Current supported read pattern is polling via `GET /v1/events/users` and ACKing with `POST /v1/events/ack-by-id`.
+
+## Testing helpers
+
+- `RabbitMQ_Facade.postman_collection.json`
+- `make_script_payload.py`
 
 ## Logs
 
-The service writes rotating logs to:
+Rotating application log file:
 - `facade.log`

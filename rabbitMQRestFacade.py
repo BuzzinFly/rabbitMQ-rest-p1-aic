@@ -514,6 +514,11 @@ def ack_event_by_id(req: AckByIdRequest, _: None = Depends(require_api_key)):
         batch_id = rec.batch_id
 
         conn.add_callback_threadsafe(lambda dt=delivery_tag: ch.basic_ack(delivery_tag=dt, multiple=False))
+        # before scheduling the ack
+        if not conn or not conn.is_open or not ch or not ch.is_open:
+            # can't ack because the channel/connection that delivered the message is gone
+            # return something the connector can treat as retryable
+            raise HTTPException(status_code=409, detail="Lease channel closed; event will be redelivered")
 
         pending.pop(req.eventId, None)
 

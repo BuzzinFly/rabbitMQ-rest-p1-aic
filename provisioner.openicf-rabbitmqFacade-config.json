@@ -13,11 +13,11 @@
             "includeData": true,
             "leaseSeconds": 10,
             "limit": 100,
-            "queueName": "cs-baseline"
+            "queueName": "pingidentity-test"
         },
         "readScriptFileName": "ReadScript.groovy",
         "scriptRoots": [
-            "/Users/carlos.scott/dev/rabbitMQRest/"
+            "C:\\PINGCIAM\\openicf\\scripts\\rabbitMqApi"
         ],
         "searchScriptFileName": "SearchScript.groovy",
         "serviceAddress": "http://localhost:8000",
@@ -26,7 +26,7 @@
     "connectorRef": {
         "bundleName": "org.forgerock.openicf.connectors.scriptedrest-connector",
         "bundleVersion": "1.5.20.32",
-        "connectorHostRef": "macbook-rcs",
+        "connectorHostRef": "proeducaapisconnector",
         "connectorName": "org.forgerock.openicf.connectors.scriptedrest.ScriptedRESTConnector",
         "systemType": "provisioner.openicf"
     },

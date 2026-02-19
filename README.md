@@ -63,6 +63,8 @@ cp .env.example .env
 - `SUBSCRIBER_APPLICATION=PingOneAIC`
 - `DEFAULT_QUEUE_USERS=Ping.CuentaModificadaSubscriptor`
 - `DEFAULT_EVENTTYPE_USERS=CuentaModificada`
+- `READ_CACHE_TTL_SECONDS=600`
+- `READ_CACHE_MAX_ITEMS=5000`
 
 ### Legacy variable
 
@@ -115,7 +117,16 @@ curl "http://localhost:8000/v1/events/users?queue=Ping.ClienteModificadoSubscrip
   -H "X-API-Key: replace_with_api_key"
 ```
 
-### 3) Publish message
+### 3) Read single event by id
+
+`GET /v1/events/by-id/{eventId}`
+
+```bash
+curl "http://localhost:8000/v1/events/by-id/replace-with-event-id" \
+  -H "X-API-Key: replace_with_api_key"
+```
+
+### 4) Publish message
 
 `POST /v1/publish`
 
@@ -141,7 +152,7 @@ curl -X POST "http://localhost:8000/v1/publish" \
   }'
 ```
 
-### 4) ACK by id
+### 5) ACK by id
 
 `POST /v1/events/ack-by-id`
 
@@ -152,7 +163,7 @@ curl -X POST "http://localhost:8000/v1/events/ack-by-id" \
   -d '{"eventId":"replace-with-event-id"}'
 ```
 
-### 5) Fail by id (audit + NACK)
+### 6) Fail by id (audit + NACK)
 
 `POST /v1/events/fail-by-id`
 
@@ -167,7 +178,7 @@ curl -X POST "http://localhost:8000/v1/events/fail-by-id" \
   }'
 ```
 
-### 6) Batch ACK
+### 7) Batch ACK
 
 `POST /v1/events/acks`
 
@@ -178,7 +189,7 @@ curl -X POST "http://localhost:8000/v1/events/acks" \
   -d '{"batchId":"b_12345678","eventIds":["event-id-1","event-id-2"]}'
 ```
 
-### 7) Batch NACK
+### 8) Batch NACK
 
 `POST /v1/events/nacks`
 
@@ -204,7 +215,7 @@ Current connector scripts:
 Important notes:
 - `SearchScript.groovy` now uses `customConfiguration` with keys like `queueName`, `eventName`, `limit`, `leaseSeconds`, `includeData`.
 - `DeleteScript.groovy` uses `POST /v1/events/ack-by-id`.
-- `ReadScript.groovy` still references `GET /v1/user-events/{id}`, which is not implemented in the current FastAPI service.
+- `ReadScript.groovy` uses `GET /v1/events/by-id/{id}`.
 
 ## Postman
 
@@ -218,6 +229,7 @@ Collection variables include:
 - `queueName`
 - `eventType`
 - `eventName`
+- `eventId`
 
 ## Logs
 

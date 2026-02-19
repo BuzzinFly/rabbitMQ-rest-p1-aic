@@ -129,6 +129,34 @@
       "response": []
     },
     {
+      "name": "Read Event by ID",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/by-id/{{eventId}}",
+          "protocol": "http",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events",
+            "by-id",
+            "{{eventId}}"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
       "name": "Publish Message",
       "request": {
         "method": "POST",
@@ -361,6 +389,10 @@
     {
       "key": "eventName",
       "value": "ClienteModificado"
+    },
+    {
+      "key": "eventId",
+      "value": "replace-with-event-id"
     }
   ]
 }

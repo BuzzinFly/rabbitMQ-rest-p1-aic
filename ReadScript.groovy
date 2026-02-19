@@ -1,6 +1,6 @@
 // ReadScript.groovy (DROP-IN, read-by-id)
-// Uses: GET /v1/user-events/{id}
-// Avoids poll+lease side effects.
+// Uses: GET /v1/events/by-id/{id}
+// No poll/lease side effects.
 
 import groovy.json.JsonSlurper
 import java.nio.charset.StandardCharsets
@@ -15,6 +15,7 @@ if (objectClass != ObjectClass.ACCOUNT) {
     return null
 }
 
+// --- resolve id ---
 def id = null
 if (uid instanceof Uid) {
     id = uid.getUidValue()
@@ -26,11 +27,16 @@ if (!id || id.trim().isEmpty()) {
 }
 id = id.trim()
 
-def baseUrl = (configuration.serviceAddress ?: "").toString().replaceAll("/+\$", "")
+// --- baseUrl ---
+def baseUrl = (configuration.serviceAddress ?: "").toString()
+while (baseUrl.endsWith("/")) {
+    baseUrl = baseUrl.substring(0, baseUrl.length() - 1)
+}
 if (!baseUrl) {
     throw new RuntimeException("configuration.serviceAddress is required")
 }
 
+// --- api key ---
 def apiKey = null
 def pw = configuration.password
 if (pw != null) {
@@ -41,7 +47,8 @@ if (!apiKey) {
     throw new RuntimeException("API key is empty in configuration.password")
 }
 
-def urlStr = "${baseUrl}/v1/user-events/${URLEncoder.encode(id, 'UTF-8')}"
+// --- call facade ---
+def urlStr = "${baseUrl}/v1/events/by-id/${URLEncoder.encode(id, 'UTF-8')}"
 
 HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection()
 conn.setRequestMethod("GET")
@@ -51,7 +58,7 @@ conn.setRequestProperty("Accept", "application/json")
 conn.setRequestProperty("X-API-Key", apiKey)
 
 int status = conn.getResponseCode()
-if (status == 204 || status == 404) {
+if (status == 404 || status == 204) {
     return null
 }
 
@@ -70,20 +77,22 @@ def ev = new JsonSlurper().parseText(bodyText)
 if (!(ev instanceof Map)) return null
 
 def evId = (ev._id ?: ev.__UID__ ?: id)?.toString()
+if (!evId) evId = id
 
 def cob = new ConnectorObjectBuilder()
 cob.setObjectClass(ObjectClass.ACCOUNT)
 cob.setUid(evId)
 cob.setName(evId)
 
-// Copy attributes your schema exposes
-["Action","DateTime","Key","Name","Application","Sender","AccountId","Content","ExceptionMessage","batchId"].each { k ->
+// Emit only what your schema supports (current approach)
+def allowed = ["_id","batchId","eventType","sourceQueue","receivedAt","headers","rawContent","data"]
+allowed.each { k ->
     if (ev.containsKey(k) && ev[k] != null) {
         cob.addAttribute(k, ev[k])
     }
 }
-if (ev.containsKey("data") && ev["data"] != null) {
-    cob.addAttribute("data", ev["data"])
-}
+
+// Convenience: always set _id
+cob.addAttribute("_id", evId)
 
 return cob.build()

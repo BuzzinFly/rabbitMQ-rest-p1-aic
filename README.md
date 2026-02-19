@@ -1,25 +1,20 @@
 # rabbitMQRest
 
-`rabbitMQRest` is a FastAPI facade over RabbitMQ for PingOne AIC/OpenICF Scripted REST flows.
+`rabbitMQRest` is a FastAPI facade for RabbitMQ used by PingOne AIC/OpenICF Scripted REST connectors.
 
-It supports:
-- Publishing messages (`/v1/publish`)
-- Polling messages with lease reservation (`/v1/events/users`)
-- Acknowledging by batch or by id (`/v1/events/acks`, `/v1/events/ack-by-id`)
-- Negative acknowledgements (`/v1/events/nacks`)
+Current version behavior is **multi-queue polling with lease + ACK/NACK + audit publishing**.
 
-## Current architecture
+## What changed
 
-- A background consumer thread pulls from `QUEUE_NAME` with manual ack and configurable prefetch.
-- Messages are normalized into a bus envelope with fields:
-  `Action`, `DateTime`, `Key`, `Name`, `Application`, `Sender`, `AccountId`, `Content`, `ExceptionMessage`
-- `/v1/events/users` returns OpenICF-friendly objects including `_id`, `__NAME__`, `batchId`, and envelope attributes.
-- Leases are in-memory only (process restart clears pending/lease state).
+- Polling is queue-driven via `GET /v1/events`.
+- Legacy compatibility endpoint `GET /v1/events/users` is still available.
+- ACK success and processing failures publish audit records to `AUDIT_QUEUE`.
+- Consumers are long-lived per queue with auto-reconnect and connection tuning.
 
 ## Requirements
 
 - Python 3.9+
-- Reachable RabbitMQ broker (CloudAMQP or self-managed)
+- Reachable RabbitMQ broker
 
 ## Build
 
@@ -37,28 +32,41 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Runtime configuration (`.env`)
+## Configuration
 
-Create env file:
+Create `.env` from `.env.example`:
 
 ```bash
 cp .env.example .env
 ```
 
-Required:
+### Required for runtime
+
 - `RABBITMQ_HOST`
+- `RABBITMQ_PORT`
 - `RABBITMQ_VHOST`
 - `RABBITMQ_USERNAME`
 - `RABBITMQ_PASSWORD`
-- `QUEUE_NAME`
+- `RABBITMQ_USE_TLS`
 - `FACADE_API_KEY`
 
-Optional (with defaults from `rabbitMQRestFacade.py`):
-- `PORT` default `8080` (set to `8000` to match examples below)
-- `RABBITMQ_PORT` default `5671`
-- `RABBITMQ_USE_TLS` default `true`
-- `PREFETCH` default `200`
-- `DEFAULT_LEASE_SECONDS` default `5`
+### Commonly used defaults
+
+- `PORT=8000`
+- `PREFETCH=200`
+- `DEFAULT_LEASE_SECONDS=10`
+- `RABBITMQ_HEARTBEAT=60`
+- `RABBITMQ_BLOCKED_CONNECTION_TIMEOUT=30`
+- `RABBITMQ_SOCKET_TIMEOUT=10`
+- `CONSUMER_RECONNECT_DELAY=5`
+- `AUDIT_QUEUE=Unir.Audit.ReceivedBusMessages`
+- `SUBSCRIBER_APPLICATION=PingOneAIC`
+- `DEFAULT_QUEUE_USERS=Ping.CuentaModificadaSubscriptor`
+- `DEFAULT_EVENTTYPE_USERS=CuentaModificada`
+
+### Legacy variable
+
+- `QUEUE_NAME` exists in some environments but is not used by the current multi-queue runtime.
 
 ## Run
 
@@ -80,7 +88,34 @@ All protected endpoints require:
 X-API-Key: <FACADE_API_KEY>
 ```
 
-### Publish
+### 1) Poll events (new endpoint)
+
+`GET /v1/events`
+
+Required query params:
+- `queue`
+- `eventType`
+
+Optional query params:
+- `limit` (default `100`)
+- `leaseSeconds` (default from env)
+- `includeData` (default `true`)
+
+```bash
+curl "http://localhost:8000/v1/events?queue=Ping.ClienteModificadoSubscriptor&eventType=ClienteModificado&limit=10&leaseSeconds=10&includeData=true" \
+  -H "X-API-Key: replace_with_api_key"
+```
+
+### 2) Poll events (legacy compatibility endpoint)
+
+`GET /v1/events/users`
+
+```bash
+curl "http://localhost:8000/v1/events/users?queue=Ping.ClienteModificadoSubscriptor&eventName=ClienteModificado&limit=10&leaseSeconds=10&includeData=true" \
+  -H "X-API-Key: replace_with_api_key"
+```
+
+### 3) Publish message
 
 `POST /v1/publish`
 
@@ -90,35 +125,49 @@ curl -X POST "http://localhost:8000/v1/publish" \
   -H "X-API-Key: replace_with_api_key" \
   -d '{
     "exchange": "",
-    "routingKey": "cs-baseline",
+    "routingKey": "Ping.ClienteModificadoSubscriptor",
     "persistent": true,
     "contentType": "application/json",
+    "headers": {
+      "key": "evt-1001",
+      "application": "PingOneAIC",
+      "accountId": "24525",
+      "action": "UPDATE"
+    },
     "payload": {
-      "Name": "CuentaModificada",
-      "Action": "UPDATE",
-      "Application": "PingOneAIC",
-      "Sender": "PingOneAIC",
-      "AccountId": "24525",
-      "Content": "{\"idAlumno\":\"24525\",\"status\":\"ACTIVE\"}"
+      "IdCliente": "24525",
+      "Estado": "ACTIVO"
     }
   }'
 ```
 
-### Poll (lease + filter)
+### 4) ACK by id
 
-`GET /v1/events/users?limit=100&leaseSeconds=10&eventName=CuentaModificada&includeData=true`
+`POST /v1/events/ack-by-id`
 
 ```bash
-curl "http://localhost:8000/v1/events/users?limit=10&leaseSeconds=10&eventName=CuentaModificada&includeData=true" \
-  -H "X-API-Key: replace_with_api_key"
+curl -X POST "http://localhost:8000/v1/events/ack-by-id" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: replace_with_api_key" \
+  -d '{"eventId":"replace-with-event-id"}'
 ```
 
-Notes:
-- `eventName` defaults to `CuentaModificada`
-- `includeData=true` adds parsed JSON from `Content` into `data`
-- returns `204` when no events are available
+### 5) Fail by id (audit + NACK)
 
-### ACK batch
+`POST /v1/events/fail-by-id`
+
+```bash
+curl -X POST "http://localhost:8000/v1/events/fail-by-id" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: replace_with_api_key" \
+  -d '{
+    "eventId":"replace-with-event-id",
+    "exceptionMessage":"Business validation failed",
+    "requeue":true
+  }'
+```
+
+### 6) Batch ACK
 
 `POST /v1/events/acks`
 
@@ -129,18 +178,7 @@ curl -X POST "http://localhost:8000/v1/events/acks" \
   -d '{"batchId":"b_12345678","eventIds":["event-id-1","event-id-2"]}'
 ```
 
-### ACK by id
-
-`POST /v1/events/ack-by-id`
-
-```bash
-curl -X POST "http://localhost:8000/v1/events/ack-by-id" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: replace_with_api_key" \
-  -d '{"eventId":"event-id-1"}'
-```
-
-### NACK batch
+### 7) Batch NACK
 
 `POST /v1/events/nacks`
 
@@ -151,39 +189,37 @@ curl -X POST "http://localhost:8000/v1/events/nacks" \
   -d '{"batchId":"b_12345678","eventIds":["event-id-1"],"requeue":true}'
 ```
 
-## OpenICF / PingOne AIC configuration
+## OpenICF / Scripted REST connector
 
-Sample connector config:
+Sample config file:
 - `provisioner.openicf-rabbitmqFacade-config.json`
 
-Important fields:
-- `serviceAddress`: base URL for facade (sample currently uses `http://localhost:8000`)
-- `password`: GuardedString that stores `FACADE_API_KEY`
-- `propertyBag.queueName`: default routing key used by `CreateScript.groovy`
-- `propertyBag.eventName`: poll filter used by `SearchScript.groovy` (`CuentaModificada`)
-- `propertyBag.limit`, `propertyBag.leaseSeconds`, `propertyBag.includeData`
+Current connector scripts:
+- `SearchScript.groovy`
+- `DeleteScript.groovy`
+- `CreateScript.groovy`
+- `ReadScript.groovy`
+- `CustomizerScript.groovy`
 
-Scripts in use:
-- `CreateScript.groovy` publish + transform to legacy bus payload shape
-- `SearchScript.groovy` poll + emit connector attributes
-- `DeleteScript.groovy` ACK-by-id
-- `ReadScript.groovy` read-by-id script
-- `TestScript.groovy` health check
-- `CustomizerScript.groovy` HTTP client customization hooks
-- `SchemaScript.groovy` schema script stub
+Important notes:
+- `SearchScript.groovy` now uses `customConfiguration` with keys like `queueName`, `eventName`, `limit`, `leaseSeconds`, `includeData`.
+- `DeleteScript.groovy` uses `POST /v1/events/ack-by-id`.
+- `ReadScript.groovy` still references `GET /v1/user-events/{id}`, which is not implemented in the current FastAPI service.
 
-## Important compatibility note
+## Postman
 
-- `ReadScript.groovy` references `GET /v1/user-events/{id}`.
-- That endpoint is not currently implemented in `rabbitMQRestFacade.py`.
-- Current supported read pattern is polling via `GET /v1/events/users` and ACKing with `POST /v1/events/ack-by-id`.
+Use `RabbitMQ_Facade.postman_collection.json`.
 
-## Testing helpers
-
-- `RabbitMQ_Facade.postman_collection.json`
-- `make_script_payload.py`
+Collection variables include:
+- `facadeHost`
+- `facadePort`
+- `facadeAPIVersion`
+- `facadeAPIKey`
+- `queueName`
+- `eventType`
+- `eventName`
 
 ## Logs
 
-Rotating application log file:
+Rotating log file:
 - `facade.log`

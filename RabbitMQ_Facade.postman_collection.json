@@ -7,6 +7,128 @@
   },
   "item": [
     {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "http://{{facadeHost}}:{{facadePort}}/health",
+          "protocol": "http",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "health"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Poll Events (New /v1/events)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events?queue={{queueName}}&eventType={{eventType}}&limit=10&leaseSeconds=10&includeData=true",
+          "protocol": "http",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events"
+          ],
+          "query": [
+            {
+              "key": "queue",
+              "value": "{{queueName}}"
+            },
+            {
+              "key": "eventType",
+              "value": "{{eventType}}"
+            },
+            {
+              "key": "limit",
+              "value": "10"
+            },
+            {
+              "key": "leaseSeconds",
+              "value": "10"
+            },
+            {
+              "key": "includeData",
+              "value": "true"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Poll Events (Compat /v1/events/users)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "url": {
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/users?queue={{queueName}}&eventName={{eventName}}&limit=10&leaseSeconds=10&includeData=true",
+          "protocol": "http",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events",
+            "users"
+          ],
+          "query": [
+            {
+              "key": "queue",
+              "value": "{{queueName}}"
+            },
+            {
+              "key": "eventName",
+              "value": "{{eventName}}"
+            },
+            {
+              "key": "limit",
+              "value": "10"
+            },
+            {
+              "key": "leaseSeconds",
+              "value": "10"
+            },
+            {
+              "key": "includeData",
+              "value": "true"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
       "name": "Publish Message",
       "request": {
         "method": "POST",
@@ -24,7 +146,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"exchange\": \"\",\n  \"routingKey\": \"cs-baseline\",\n  \"persistent\": true,\n  \"contentType\": \"application/json\",\n  \"payload\": {\n    \"Name\": \"CuentaModificada\",\n    \"Action\": \"UPDATE\",\n    \"Application\": \"PingOneAIC\",\n    \"Sender\": \"PingOneAIC\",\n    \"AccountId\": \"24525\",\n    \"Content\": \"{\\\"idAlumno\\\":\\\"24525\\\",\\\"status\\\":\\\"ACTIVE\\\"}\"\n  }\n}",
+          "raw": "{\n  \"exchange\": \"\",\n  \"routingKey\": \"{{queueName}}\",\n  \"persistent\": true,\n  \"contentType\": \"application/json\",\n  \"headers\": {\n    \"key\": \"evt-1001\",\n    \"application\": \"PingOneAIC\",\n    \"accountId\": \"24525\",\n    \"action\": \"UPDATE\"\n  },\n  \"payload\": {\n    \"IdCliente\": \"24525\",\n    \"Estado\": \"ACTIVO\"\n  }\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -41,56 +163,6 @@
           "path": [
             "{{facadeAPIVersion}}",
             "publish"
-          ]
-        }
-      },
-      "response": []
-    },
-    {
-      "name": "Read Messages from Queue",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json",
-            "type": "text"
-          },
-          {
-            "key": "X-API-Key",
-            "value": "{{facadeAPIKey}}",
-            "type": "text"
-          }
-        ],
-        "url": {
-          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/users?limit=10&leaseSeconds=10&eventName=CuentaModificada&includeData=true",
-          "protocol": "http",
-          "host": [
-            "{{facadeHost}}"
-          ],
-          "port": "{{facadePort}}",
-          "path": [
-            "{{facadeAPIVersion}}",
-            "events",
-            "users"
-          ],
-          "query": [
-            {
-              "key": "limit",
-              "value": "10"
-            },
-            {
-              "key": "leaseSeconds",
-              "value": "10"
-            },
-            {
-              "key": "eventName",
-              "value": "CuentaModificada"
-            },
-            {
-              "key": "includeData",
-              "value": "true"
-            }
           ]
         }
       },
@@ -132,6 +204,47 @@
             "{{facadeAPIVersion}}",
             "events",
             "ack-by-id"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Fail Message by ID",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "X-API-Key",
+            "value": "{{facadeAPIKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"eventId\": \"replace-with-event-id\",\n  \"exceptionMessage\": \"Business validation failed\",\n  \"requeue\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "http://{{facadeHost}}:{{facadePort}}/{{facadeAPIVersion}}/events/fail-by-id",
+          "protocol": "http",
+          "host": [
+            "{{facadeHost}}"
+          ],
+          "port": "{{facadePort}}",
+          "path": [
+            "{{facadeAPIVersion}}",
+            "events",
+            "fail-by-id"
           ]
         }
       },
@@ -236,6 +349,18 @@
     {
       "key": "facadeAPIKey",
       "value": "replace_with_api_key"
+    },
+    {
+      "key": "queueName",
+      "value": "Ping.ClienteModificadoSubscriptor"
+    },
+    {
+      "key": "eventType",
+      "value": "ClienteModificado"
+    },
+    {
+      "key": "eventName",
+      "value": "ClienteModificado"
     }
   ]
 }

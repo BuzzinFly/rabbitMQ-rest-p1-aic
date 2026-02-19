@@ -94,6 +94,10 @@ SUBSCRIBER_APPLICATION = os.getenv("SUBSCRIBER_APPLICATION", "PingOneAIC")
 DEFAULT_QUEUE_USERS = os.getenv("DEFAULT_QUEUE_USERS", "Ping.CuentaModificadaSubscriptor")
 DEFAULT_EVENTTYPE_USERS = os.getenv("DEFAULT_EVENTTYPE_USERS", "CuentaModificada")
 
+# READ-by-id cache (supports IDM console detail view)
+READ_CACHE_TTL_SECONDS = env_int("READ_CACHE_TTL_SECONDS", 600)  # 10 minutes
+READ_CACHE_MAX_ITEMS = env_int("READ_CACHE_MAX_ITEMS", 5000)
+
 
 def build_rabbit_url() -> str:
     scheme = "amqps" if RABBITMQ_USE_TLS else "amqp"
@@ -130,6 +134,7 @@ def safe_headers(properties: pika.BasicProperties) -> Dict[str, Any]:
     We expose canonical keys regardless of original casing.
     """
     raw = dict(properties.headers or {})
+
     def pick(k: str) -> Any:
         if k in raw:
             return raw.get(k)
@@ -168,7 +173,12 @@ def compute_event_id(
     try:
         if event_type == "ClienteModificado" and payload and "IdCliente" in payload:
             return f"BUSKEY:{event_type}:{payload['IdCliente']}:{received_at_utc}"
-        if event_type == "MatriculaGestorRealizada" and payload and "IdMatricula" in payload and "FechaCambioEstado" in payload:
+        if (
+            event_type == "MatriculaGestorRealizada"
+            and payload
+            and "IdMatricula" in payload
+            and "FechaCambioEstado" in payload
+        ):
             return f"BUSKEY:{event_type}:{payload['IdMatricula']}:{payload['FechaCambioEstado']}"
     except Exception:
         pass
@@ -257,6 +267,7 @@ class ConsumerWorker:
     One long-lived consumer per queue.
     Buffers messages in memory and supports thread-safe ack/nack.
     """
+
     def __init__(self, queue_name: str):
         self.queue = queue_name
         self._buffer_lock = threading.Lock()
@@ -288,7 +299,9 @@ class ConsumerWorker:
         if not (self._conn and self._ch and self._conn.is_open and self._ch.is_open):
             raise HTTPException(status_code=503, detail="RabbitMQ worker not ready")
         try:
-            self._conn.add_callback_threadsafe(lambda: self._ch.basic_ack(delivery_tag=delivery_tag, multiple=False))
+            self._conn.add_callback_threadsafe(
+                lambda: self._ch.basic_ack(delivery_tag=delivery_tag, multiple=False)
+            )
         except pika.exceptions.ConnectionWrongStateError:
             raise HTTPException(status_code=409, detail="Lease channel closed; event will be redelivered")
 
@@ -398,9 +411,41 @@ class PendingRecord:
     batch_id: Optional[str] = None
 
 
-pending: Dict[str, PendingRecord] = {}     # _id -> record
-batches: Dict[str, Set[str]] = {}          # batchId -> set(_id)
+pending: Dict[str, PendingRecord] = {}  # _id -> record
+batches: Dict[str, Set[str]] = {}  # batchId -> set(_id)
 lock = threading.RLock()
+
+
+# ----------------------------
+# READ-by-id cache (post-ack/fail support)
+# ----------------------------
+@dataclass
+class CachedEvent:
+    event: Dict[str, Any]
+    expires_at_ms: int
+
+
+recent: Dict[str, CachedEvent] = {}  # eventId -> CachedEvent
+
+
+def purge_recent_locked() -> None:
+    t = now_ms()
+    for k, v in list(recent.items()):
+        if v.expires_at_ms <= t:
+            recent.pop(k, None)
+
+
+def cache_put(event_id: str, event_obj: Dict[str, Any]) -> None:
+    """Cache event for read-by-id after it leaves pending (ACK/FAIL)."""
+    if READ_CACHE_TTL_SECONDS <= 0:
+        return
+    expires = now_ms() + READ_CACHE_TTL_SECONDS * 1000
+    with lock:
+        # Size bound: purge expired, then drop arbitrary keys until under limit.
+        purge_recent_locked()
+        while len(recent) >= READ_CACHE_MAX_ITEMS and recent:
+            recent.pop(next(iter(recent.keys())), None)
+        recent[event_id] = CachedEvent(event=event_obj, expires_at_ms=expires)
 
 
 def purge_expired_leases() -> None:
@@ -430,11 +475,35 @@ def purge_expired_leases() -> None:
             pass
 
 
-# Lease janitor
+def format_event_for_api(event_id: str, rec: PendingRecord) -> Dict[str, Any]:
+    item: Dict[str, Any] = {
+        "_id": event_id,
+        "__UID__": event_id,
+        "__NAME__": event_id,
+        "batchId": rec.batch_id,
+        "eventType": rec.event_type,
+        "sourceQueue": rec.queue,
+        "receivedAt": rec.received_at_utc,
+        "headers": {
+            "key": rec.headers.get("key"),
+            "application": rec.headers.get("application"),
+            "accountId": rec.headers.get("accountId"),
+            "action": rec.headers.get("action"),
+        },
+        "rawContent": rec.raw_content,
+    }
+    if rec.payload is not None:
+        item["data"] = rec.payload
+    return item
+
+
+# Lease janitor (also purges read cache)
 def lease_janitor_thread() -> None:
     while True:
         try:
             purge_expired_leases()
+            with lock:
+                purge_recent_locked()
         except Exception:
             logger.exception("Lease janitor error")
         time.sleep(1)
@@ -483,7 +552,7 @@ class FailByIdRequest(BaseModel):
 # ----------------------------
 # FastAPI app
 # ----------------------------
-app = FastAPI(title="RabbitMQ Facade (multi-queue poll/ack + audit)", version="2.0.0")
+app = FastAPI(title="RabbitMQ Facade (multi-queue poll/ack + audit)", version="2.1.0")
 
 
 @app.on_event("startup")
@@ -506,6 +575,8 @@ def health():
             by_queue[rec.queue] = by_queue.get(rec.queue, 0) + 1
             by_type[rec.event_type] = by_type.get(rec.event_type, 0) + 1
 
+        recent_count = len(recent)
+
     with WORKERS_LOCK:
         workers_state = {
             q: {
@@ -519,10 +590,29 @@ def health():
     return {
         "ok": True,
         "pending": len(pending),
+        "recentCache": recent_count,
         "byQueue": by_queue,
         "byType": by_type,
         "workers": workers_state,
+        "readCacheTtlSeconds": READ_CACHE_TTL_SECONDS,
+        "readCacheMaxItems": READ_CACHE_MAX_ITEMS,
     }
+
+
+@app.get("/v1/events/by-id/{eventId}")
+def get_event_by_id(eventId: str, _: None = Depends(require_api_key)):
+    # 1) pending first
+    with lock:
+        rec = pending.get(eventId)
+        if rec is not None:
+            return format_event_for_api(eventId, rec)
+
+        # 2) recent cache (post-ack/fail)
+        ce = recent.get(eventId)
+        if ce is not None and ce.expires_at_ms > now_ms():
+            return ce.event
+
+    raise HTTPException(status_code=404, detail="Event not found")
 
 
 @app.get("/v1/events")
@@ -540,7 +630,7 @@ def get_events(
       - _id for ack-by-id
       - eventType, sourceQueue
       - headers (canonical fields)
-      - payload (deserialized JSON object)
+      - data (deserialized JSON object)
       - rawContent (string)
     """
     purge_expired_leases()
@@ -577,7 +667,7 @@ def get_events(
             except Exception:
                 logger.exception("Failed to publish audit (deserialization error)")
 
-            # Requeue by default (safe); adjust to requeue=False if DLQ is configured & desired
+            # Requeue by default (safe)
             try:
                 worker.nack(bm.delivery_tag, requeue=True)
             except Exception:
@@ -613,7 +703,8 @@ def get_events(
 
         item: Dict[str, Any] = {
             "_id": event_id,
-            "__NAME__": event_id,  # compatibility with prior connector expectations
+            "__UID__": event_id,
+            "__NAME__": event_id,
             "batchId": batch_id,
             "eventType": eventType,
             "sourceQueue": queue,
@@ -624,19 +715,24 @@ def get_events(
                 "accountId": headers.get("accountId"),
                 "action": headers.get("action"),
             },
+            "rawContent": raw_text,
         }
         if includeData:
             item["data"] = payload
-        # Keep raw for audit traceability/debug
-        item["rawContent"] = raw_text
 
         results.append(item)
 
     if not results:
         return Response(status_code=204)
 
-    logger.info("Issued batch=%s results=%d queue=%s eventType=%s leaseSeconds=%d",
-                batch_id, len(results), queue, eventType, leaseSeconds)
+    logger.info(
+        "Issued batch=%s results=%d queue=%s eventType=%s leaseSeconds=%d",
+        batch_id,
+        len(results),
+        queue,
+        eventType,
+        leaseSeconds,
+    )
 
     # Keep same “paging wrapper” style as /v1/events/users for connector compatibility
     return {
@@ -702,7 +798,12 @@ def publish_message(req: PublishRequest, _: None = Depends(require_api_key)):
             properties=props,
         )
 
-        logger.info("Published message exchange=%s routingKey=%s messageId=%s", req.exchange, req.routingKey, req.messageId)
+        logger.info(
+            "Published message exchange=%s routingKey=%s messageId=%s",
+            req.exchange,
+            req.routingKey,
+            req.messageId,
+        )
         return {"ok": True}
     except Exception:
         logger.exception("Publish failed")
@@ -719,6 +820,9 @@ def ack_event_by_id(req: AckByIdRequest, _: None = Depends(require_api_key)):
         rec = pending.get(req.eventId)
         if rec is None:
             raise HTTPException(status_code=404, detail="Event not found or already ACKed")
+
+        # Cache for read-by-id UX before removing from pending
+        cache_put(req.eventId, format_event_for_api(req.eventId, rec))
 
         # remove from pending first (so concurrent requests don’t double-ack)
         pending.pop(req.eventId, None)
@@ -760,6 +864,9 @@ def fail_event_by_id(req: FailByIdRequest, _: None = Depends(require_api_key)):
         if rec is None:
             raise HTTPException(status_code=404, detail="Event not found or already completed")
 
+        # Cache for read-by-id UX before removing from pending
+        cache_put(req.eventId, format_event_for_api(req.eventId, rec))
+
         pending.pop(req.eventId, None)
         if rec.batch_id and rec.batch_id in batches:
             batches[rec.batch_id].discard(req.eventId)
@@ -783,7 +890,13 @@ def fail_event_by_id(req: FailByIdRequest, _: None = Depends(require_api_key)):
     worker = get_worker(rec.queue)
     worker.nack(rec.delivery_tag, requeue=req.requeue)
 
-    logger.warning("FAIL by id=%s queue=%s type=%s requeue=%s", req.eventId, rec.queue, rec.event_type, req.requeue)
+    logger.warning(
+        "FAIL by id=%s queue=%s type=%s requeue=%s",
+        req.eventId,
+        rec.queue,
+        rec.event_type,
+        req.requeue,
+    )
     return {"failed": req.eventId, "requeued": req.requeue}
 
 
@@ -805,6 +918,10 @@ def ack_events(req: AckRequest, _: None = Depends(require_api_key)):
             if rec is None or rec.batch_id != req.batchId:
                 ignored.append(event_id)
                 continue
+
+            # Cache for read-by-id UX before removing from pending
+            cache_put(event_id, format_event_for_api(event_id, rec))
+
             pending.pop(event_id, None)
             acked.append(event_id)
             by_queue.setdefault(rec.queue, []).append((event_id, rec))
@@ -883,3 +1000,10 @@ def shutdown():
         except Exception:
             pass
     logger.info("Shutdown complete")
+
+
+# Optional: convenience for `python facade.py`
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

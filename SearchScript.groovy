@@ -1,10 +1,11 @@
-// SearchScript.groovy (DROP-IN)
-// Uses the OpenICF "handler" callback (Closure) to emit results one-by-one.
+// SearchScript.groovy (DROP-IN, UPDATED FOR DEDICATED QUEUES)
+// Uses /v1/events/users with queue=... so existing connector behavior stays consistent.
 
 import groovy.json.JsonSlurper
 import java.nio.charset.StandardCharsets
 import java.net.HttpURLConnection
 import java.net.URLEncoder
+import groovy.util.ConfigSlurper
 
 def getApiKey() {
     def gs = configuration.password  // GuardedString
@@ -35,18 +36,35 @@ def httpGet(String urlStr, Map<String, String> headers = [:]) {
     return [code: code, body: body]
 }
 
-def baseUrl = (configuration.serviceAddress ?: "").toString().replaceAll("/+\$", "")
+def baseUrl = (configuration.serviceAddress ?: "").toString()
+while (baseUrl.endsWith("/")) {
+    baseUrl = baseUrl.substring(0, baseUrl.length() - 1)
+}
 if (!baseUrl) throw new IllegalStateException("configuration.serviceAddress is required")
 
-def bag = configuration.propertyBag ?: [:]
-def limit = ((bag.limit ?: 100) as int)
-def leaseSeconds = ((bag.leaseSeconds ?: 10) as int)
-def eventName = (bag.eventName ?: "CuentaModificada").toString()
-def includeData = (bag.includeData != null) ? (bag.includeData as boolean) : true
+// ---- customConfiguration (script-consumable) ----
+def customText = (configuration.customConfiguration ?: "").toString()
+def cfg = new ConfigSlurper().parse(customText)
+
+def limit = ((cfg.get("limit") ?: 100) as int)
+def leaseSeconds = ((cfg.get("leaseSeconds") ?: 10) as int)
+def eventName = (cfg.get("eventName") ?: "CuentaModificada").toString()
+def includeData = (cfg.get("includeData") != null) ? (cfg.get("includeData") as boolean) : true
+
+def queueName = (cfg.get("queueName") ?: "").toString()
+if (!queueName) {
+    throw new IllegalStateException("customConfiguration.queueName is required. customConfiguration=" + customText)
+}
 
 def apiKey = getApiKey()
 
-def qs = "limit=${limit}&leaseSeconds=${leaseSeconds}&eventName=${URLEncoder.encode(eventName, 'UTF-8')}&includeData=${includeData}"
+def qs =
+    "limit=${limit}" +
+    "&leaseSeconds=${leaseSeconds}" +
+    "&eventName=${URLEncoder.encode(eventName, 'UTF-8')}" +
+    "&includeData=${includeData}" +
+    "&queue=${URLEncoder.encode(queueName, 'UTF-8')}"
+
 def url = "${baseUrl}/v1/events/users?${qs}"
 
 def resp = httpGet(url, [
@@ -59,10 +77,10 @@ if (resp.code == 204 || resp.body == null || resp.body.trim().isEmpty()) return 
 def parsed = new JsonSlurper().parseText(resp.body)
 def items = (parsed?.result instanceof List) ? parsed.result : []
 
-// Only emit business attributes (not __UID__/__NAME__ identifiers)
+// Keep emitting only a known safe set of attributes
 def allowed = [
-  "AccountId","Action","Application","Content","DateTime","ExceptionMessage",
-  "Key","Name","Sender","batchId","contentType","exchange","routingKey","persistent","data","_id"
+  "batchId","_id","eventType","sourceQueue","receivedAt",
+  "headers","rawContent","data"
 ] as Set
 
 items.each { ev ->
@@ -84,6 +102,7 @@ items.each { ev ->
             }
         }
 
+        // convenience
         attribute "_id", uidVal
     }
 }

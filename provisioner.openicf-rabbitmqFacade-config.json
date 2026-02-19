@@ -1,140 +1,50 @@
 {
-    "_id": "provisioner.openicf/rabbitmqFacade",
-    "configurationProperties": {
-        "createScriptFileName": "CreateScript.groovy",
-        "customizerScriptFileName": "CustomizerScript.groovy",
-        "defaultRequestHeaders": [
-            "Accept=application/json"
-        ],
-        "deleteScriptFileName": "DeleteScript.groovy",
-        "password": "&{esv.rabbitmq.interface.api.key}",
-        "propertyBag": {
-            "eventName": "CuentaModificada",
-            "includeData": true,
-            "leaseSeconds": 10,
-            "limit": 100,
-            "queueName": "pingidentity-test"
-        },
-        "readScriptFileName": "ReadScript.groovy",
-        "scriptRoots": [
-            "C:\\PINGCIAM\\openicf\\scripts\\rabbitMqApi"
-        ],
-        "searchScriptFileName": "SearchScript.groovy",
-        "serviceAddress": "http://localhost:8000",
-        "username": "NA"
-    },
-    "connectorRef": {
-        "bundleName": "org.forgerock.openicf.connectors.scriptedrest-connector",
-        "bundleVersion": "1.5.20.32",
-        "connectorHostRef": "proeducaapisconnector",
-        "connectorName": "org.forgerock.openicf.connectors.scriptedrest.ScriptedRESTConnector",
-        "systemType": "provisioner.openicf"
-    },
-    "enabled": true,
-    "name": "rabbitMq",
-    "objectTypes": {
-        "account": {
-            "$schema": "http://json-schema.org/draft-03/schema",
-            "id": "__ACCOUNT__",
-            "nativeType": "__ACCOUNT__",
-            "properties": {
-                "AccountId": {
-                    "nativeName": "AccountId",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "Action": {
-                    "nativeName": "Action",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "Application": {
-                    "nativeName": "Application",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "Content": {
-                    "nativeName": "Content",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "DateTime": {
-                    "nativeName": "DateTime",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "ExceptionMessage": {
-                    "nativeName": "ExceptionMessage",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "Key": {
-                    "nativeName": "Key",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "Name": {
-                    "nativeName": "Name",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "Sender": {
-                    "nativeName": "Sender",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "__NAME__": {
-                    "nativeName": "__NAME__",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "__UID__": {
-                    "nativeName": "__UID__",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "_id": {
-                    "nativeName": "_id",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "batchId": {
-                    "nativeName": "batchId",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "contentType": {
-                    "nativeName": "contentType",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "data": {
-                    "nativeName": "data",
-                    "nativeType": "object",
-                    "type": "object"
-                },
-                "exchange": {
-                    "nativeName": "exchange",
-                    "nativeType": "string",
-                    "type": "string"
-                },
-                "payload": {
-                    "nativeName": "payload",
-                    "nativeType": "object",
-                    "type": "object"
-                },
-                "persistent": {
-                    "nativeName": "persistent",
-                    "nativeType": "boolean",
-                    "type": "boolean"
-                },
-                "routingKey": {
-                    "nativeName": "routingKey",
-                    "nativeType": "string",
-                    "type": "string"
-                }
-            },
-            "type": "object"
-        }
+  "_id": "provisioner.openicf/rabbitmqFacade",
+  "name": "rabbitMq",
+  "enabled": true,
+  "connectorRef": {
+    "bundleName": "org.forgerock.openicf.connectors.scriptedrest-connector",
+    "bundleVersion": "1.5.20.32",
+    "connectorHostRef": "macbook-rcs",
+    "connectorName": "org.forgerock.openicf.connectors.scriptedrest.ScriptedRESTConnector",
+    "systemType": "provisioner.openicf"
+  },
+  "configurationProperties": {
+    "serviceAddress": "http://localhost:8000",
+    "username": "NA",
+    "password": "&{esv.rabbitmq.interface.api.key}",
+    "defaultRequestHeaders": [
+      "Accept=application/json"
+    ],
+    "scriptRoots": [
+      "/Users/carlos.scott/dev/rabbitMQRest/"
+    ],
+    "searchScriptFileName": "SearchScript.groovy",
+    "deleteScriptFileName": "DeleteScript.groovy",
+    "createScriptFileName": "CreateScript.groovy",
+    "readScriptFileName": "ReadScript.groovy",
+    "customizerScriptFileName": "CustomizerScript.groovy",
+
+    "customConfiguration": "queueName='Ping.ClienteModificadoSubscriptor'\neventName='ClienteModificado'\nlimit=100\nleaseSeconds=10\nincludeData=true\n"
+  },
+  "objectTypes": {
+    "account": {
+      "$schema": "http://json-schema.org/draft-03/schema",
+      "id": "__ACCOUNT__",
+      "nativeType": "__ACCOUNT__",
+      "type": "object",
+      "properties": {
+        "__UID__": { "nativeName": "__UID__", "nativeType": "string", "type": "string" },
+        "__NAME__": { "nativeName": "__NAME__", "nativeType": "string", "type": "string" },
+        "_id": { "nativeName": "_id", "nativeType": "string", "type": "string" },
+        "batchId": { "nativeName": "batchId", "nativeType": "string", "type": "string" },
+        "eventType": { "nativeName": "eventType", "nativeType": "string", "type": "string" },
+        "sourceQueue": { "nativeName": "sourceQueue", "nativeType": "string", "type": "string" },
+        "receivedAt": { "nativeName": "receivedAt", "nativeType": "string", "type": "string" },
+        "headers": { "nativeName": "headers", "nativeType": "object", "type": "object" },
+        "rawContent": { "nativeName": "rawContent", "nativeType": "string", "type": "string" },
+        "data": { "nativeName": "data", "nativeType": "object", "type": "object" }
+      }
     }
+  }
 }

@@ -29,6 +29,18 @@ def require_env(name: str) -> str:
     return v
 
 
+def env_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    return int(v) if v not in (None, "") else default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None or v == "":
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 # ----------------------------
 # Logging (file + console)
 # ----------------------------
@@ -54,26 +66,33 @@ if not logger.handlers:
 # ----------------------------
 # Config (from .env)
 # ----------------------------
-PORT = int(os.getenv("PORT", "8080"))
+PORT = env_int("PORT", 8000)
 
 RABBITMQ_HOST = require_env("RABBITMQ_HOST")
-RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5671"))
+RABBITMQ_PORT = env_int("RABBITMQ_PORT", 5672)
 RABBITMQ_VHOST = require_env("RABBITMQ_VHOST")
 RABBITMQ_USERNAME = require_env("RABBITMQ_USERNAME")
 RABBITMQ_PASSWORD = require_env("RABBITMQ_PASSWORD")
-RABBITMQ_USE_TLS = os.getenv("RABBITMQ_USE_TLS", "true").lower() == "true"
+RABBITMQ_USE_TLS = env_bool("RABBITMQ_USE_TLS", False)
 
-QUEUE_NAME = require_env("QUEUE_NAME")
-PREFETCH = int(os.getenv("PREFETCH", "200"))
-DEFAULT_LEASE_SECONDS = int(os.getenv("DEFAULT_LEASE_SECONDS", "5"))
+PREFETCH = env_int("PREFETCH", 200)
+DEFAULT_LEASE_SECONDS = env_int("DEFAULT_LEASE_SECONDS", 10)
 
 # Connection tuning / resilience
-RABBITMQ_HEARTBEAT = int(os.getenv("RABBITMQ_HEARTBEAT", "60"))
-RABBITMQ_BLOCKED_CONNECTION_TIMEOUT = int(os.getenv("RABBITMQ_BLOCKED_CONNECTION_TIMEOUT", "30"))
-RABBITMQ_SOCKET_TIMEOUT = int(os.getenv("RABBITMQ_SOCKET_TIMEOUT", "10"))
-CONSUMER_RECONNECT_DELAY = int(os.getenv("CONSUMER_RECONNECT_DELAY", "5"))
+RABBITMQ_HEARTBEAT = env_int("RABBITMQ_HEARTBEAT", 60)
+RABBITMQ_BLOCKED_CONNECTION_TIMEOUT = env_int("RABBITMQ_BLOCKED_CONNECTION_TIMEOUT", 30)
+RABBITMQ_SOCKET_TIMEOUT = env_int("RABBITMQ_SOCKET_TIMEOUT", 10)
+CONSUMER_RECONNECT_DELAY = env_int("CONSUMER_RECONNECT_DELAY", 5)
 
 FACADE_API_KEY = require_env("FACADE_API_KEY")
+
+# Audit
+AUDIT_QUEUE = os.getenv("AUDIT_QUEUE", "Unir.Audit.ReceivedBusMessages")
+SUBSCRIBER_APPLICATION = os.getenv("SUBSCRIBER_APPLICATION", "PingOneAIC")
+
+# Backwards-compatible defaults for /v1/events/users
+DEFAULT_QUEUE_USERS = os.getenv("DEFAULT_QUEUE_USERS", "Ping.CuentaModificadaSubscriptor")
+DEFAULT_EVENTTYPE_USERS = os.getenv("DEFAULT_EVENTTYPE_USERS", "CuentaModificada")
 
 
 def build_rabbit_url() -> str:
@@ -95,25 +114,70 @@ def require_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
 
 
 # ----------------------------
-# RabbitMQ consumer thread objects
+# Helpers
 # ----------------------------
-# epoch increments on each successful consumer reconnect; delivery_tag is only valid within the epoch/channel it was received.
-channel_ref = {"connection": None, "channel": None, "epoch": 0}
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
 
-def schedule_on_consumer_thread(fn):
-    conn = channel_ref.get("connection")
-    if conn is None or not getattr(conn, "is_open", False):
-        raise HTTPException(status_code=503, detail="RabbitMQ consumer connection not ready")
+def utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def safe_headers(properties: pika.BasicProperties) -> Dict[str, Any]:
+    """
+    Client doc expects headers: application, key, action, accountId (optional).
+    We expose canonical keys regardless of original casing.
+    """
+    raw = dict(properties.headers or {})
+    def pick(k: str) -> Any:
+        if k in raw:
+            return raw.get(k)
+        if k.lower() in raw:
+            return raw.get(k.lower())
+        if k.upper() in raw:
+            return raw.get(k.upper())
+        return None
+
+    return {
+        **raw,
+        "application": pick("application"),
+        "key": pick("key"),
+        "action": pick("action"),
+        "accountId": pick("accountId"),
+    }
+
+
+def compute_event_id(
+    *,
+    event_type: str,
+    headers: Dict[str, Any],
+    payload: Optional[Dict[str, Any]],
+    received_at_utc: str,
+    properties: pika.BasicProperties,
+) -> str:
+    # 1) header key (client-preferred)
+    if headers.get("key"):
+        return str(headers["key"])
+
+    # 2) message_id
+    if getattr(properties, "message_id", None):
+        return str(properties.message_id)
+
+    # 3) best-effort deterministic fallbacks
     try:
-        conn.add_callback_threadsafe(fn)
-    except pika.exceptions.ConnectionWrongStateError:
-        # Treat as lease invalid / retryable rather than 500
-        raise HTTPException(status_code=409, detail="Lease channel closed; event will be redelivered")
+        if event_type == "ClienteModificado" and payload and "IdCliente" in payload:
+            return f"BUSKEY:{event_type}:{payload['IdCliente']}:{received_at_utc}"
+        if event_type == "MatriculaGestorRealizada" and payload and "IdMatricula" in payload and "FechaCambioEstado" in payload:
+            return f"BUSKEY:{event_type}:{payload['IdMatricula']}:{payload['FechaCambioEstado']}"
+    except Exception:
+        pass
+
+    return str(uuid.uuid4())
 
 
 # ----------------------------
-# Publish connection (separate from consumer; guarded with a lock)
+# RabbitMQ publish connection (separate from consumers; guarded with a lock)
 # ----------------------------
 publish_conn = None
 publish_ch = None
@@ -137,154 +201,185 @@ def get_publish_channel():
         return publish_ch
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
-def now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def utc_now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def safe_get_header(properties: pika.BasicProperties, key: str) -> Optional[Any]:
-    try:
-        if properties.headers and key in properties.headers:
-            return properties.headers.get(key)
-    except Exception:
-        return None
-    return None
-
-
-def coerce_str(x: Any) -> Optional[str]:
-    if x is None:
-        return None
-    if isinstance(x, str):
-        return x
-    try:
-        return str(x)
-    except Exception:
-        return None
-
-
-# ----------------------------
-# Envelope normalization
-# ----------------------------
-ENVELOPE_FIELDS = {
-    "Action",
-    "DateTime",
-    "Key",
-    "Name",
-    "Application",
-    "Sender",
-    "AccountId",
-    "Content",
-    "ExceptionMessage",
-}
-
-
-def normalize_to_bus_envelope(payload: Dict[str, Any], properties: pika.BasicProperties) -> Dict[str, Any]:
+def publish_audit_message(
+    *,
+    key: str,
+    name: str,
+    sender: str,
+    account_id: str,
+    content: str,
+    exception_message: Optional[str] = None,
+) -> None:
     """
-    Normalize inbound payload to bus envelope schema:
-
-      Action, DateTime, Key, Name, Application, Sender, AccountId, Content, ExceptionMessage
-
-    - If payload already looks like envelope (has Name and Content), keep it.
-    - If payload is legacy/non-envelope, wrap it.
-    - Content is always a STRING (JSON text).
+    Publish to Unir.Audit.ReceivedBusMessages directly to the queue (default exchange).
     """
-    # Case 1: already in envelope form
-    if isinstance(payload, dict) and ("Name" in payload and "Content" in payload):
-        env = {k: payload.get(k) for k in ENVELOPE_FIELDS if k in payload}
-        # Ensure Content is string
-        if not isinstance(env.get("Content"), str):
-            env["Content"] = json.dumps(env.get("Content"), ensure_ascii=False)
-        # Defaults
-        env.setdefault("Action", payload.get("Action") or "REGISTER")
-        env.setdefault("DateTime", payload.get("DateTime") or utc_now_iso())
-        env.setdefault(
-            "Key",
-            payload.get("Key")
-            or coerce_str(properties.correlation_id)
-            or coerce_str(properties.message_id)
-            or str(uuid.uuid4()),
-        )
-        return env
-
-    # Case 2: legacy/non-envelope JSON payload -> wrap
-    tipo_evento = payload.get("TipoEvento") if isinstance(payload, dict) else None
-    name = coerce_str(tipo_evento) or coerce_str(payload.get("Name")) or "UnknownEvent"
-
-    application = coerce_str(safe_get_header(properties, "Application")) or coerce_str(payload.get("Application"))
-    sender = coerce_str(safe_get_header(properties, "Sender")) or coerce_str(payload.get("Sender"))
-    account_id = coerce_str(safe_get_header(properties, "AccountId")) or coerce_str(payload.get("AccountId"))
-    key = (
-        coerce_str(safe_get_header(properties, "Key"))
-        or coerce_str(properties.correlation_id)
-        or coerce_str(properties.message_id)
-        or str(uuid.uuid4())
-    )
-    action = coerce_str(safe_get_header(properties, "Action")) or coerce_str(payload.get("Action")) or "REGISTER"
-    dt = coerce_str(safe_get_header(properties, "DateTime")) or coerce_str(payload.get("DateTime")) or utc_now_iso()
-
-    return {
-        "Action": action,
-        "DateTime": dt,
+    audit_obj: Dict[str, Any] = {
+        "Action": "REGISTER",
+        "DateTime": utc_now_iso(),
         "Key": key,
         "Name": name,
-        "Application": application,
-        "Sender": sender,
-        "AccountId": account_id,
-        "Content": json.dumps(payload, ensure_ascii=False),
-        "ExceptionMessage": coerce_str(payload.get("ExceptionMessage")),
+        "Application": SUBSCRIBER_APPLICATION,
+        "Sender": sender or "UNKNOWN",
+        "AccountId": account_id or "",
+        "Content": content,
     }
+    if exception_message:
+        audit_obj["ExceptionMessage"] = exception_message
+
+    ch = get_publish_channel()
+    body = json.dumps(audit_obj, ensure_ascii=False).encode("utf-8")
+
+    # Publish direct-to-queue using default exchange.
+    ch.basic_publish(
+        exchange="",
+        routing_key=AUDIT_QUEUE,
+        body=body,
+        properties=pika.BasicProperties(
+            content_type="application/json",
+            delivery_mode=2,
+        ),
+    )
 
 
-def extract_event_type(envelope: Dict[str, Any]) -> str:
-    return coerce_str(envelope.get("Name")) or "UnknownEvent"
+# ----------------------------
+# Multi-queue consumer workers
+# ----------------------------
+@dataclass
+class BufferedMessage:
+    delivery_tag: int
+    properties: pika.BasicProperties
+    body: bytes
+    received_at_utc: str
 
 
-def parse_content_json(envelope: Dict[str, Any]) -> Dict[str, Any]:
+class ConsumerWorker:
     """
-    Parse envelope["Content"] (string) into dict when it's valid JSON.
-    If not JSON, return {"raw": <string>}.
+    One long-lived consumer per queue.
+    Buffers messages in memory and supports thread-safe ack/nack.
     """
-    c = envelope.get("Content")
-    if not isinstance(c, str):
-        return {"raw": c}
-    try:
-        return json.loads(c)
-    except Exception:
-        return {"raw": c}
+    def __init__(self, queue_name: str):
+        self.queue = queue_name
+        self._buffer_lock = threading.Lock()
+        self._buffer: List[BufferedMessage] = []
+        self._ready = threading.Event()
+        self._stop = threading.Event()
 
+        self._conn: Optional[pika.BlockingConnection] = None
+        self._ch: Optional[pika.channel.Channel] = None
 
-def parse_message(body: bytes, properties: pika.BasicProperties) -> Tuple[str, Dict[str, Any]]:
-    """
-    Returns (msg_id, envelope_dict).
-    msg_id is the facade _id used for ACK-by-id.
-    """
-    content_type = (properties.content_type or "application/json").lower()
-    body_str = body.decode("utf-8", errors="replace")
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"rabbit-consumer:{queue_name}",
+        )
 
-    if "json" in content_type:
+    def start(self):
+        if not self._thread.is_alive():
+            self._thread.start()
+        self._ready.wait(timeout=10)
+
+    def pop_batch(self, limit: int) -> List[BufferedMessage]:
+        with self._buffer_lock:
+            batch = self._buffer[:limit]
+            self._buffer = self._buffer[limit:]
+            return batch
+
+    def ack(self, delivery_tag: int):
+        if not (self._conn and self._ch and self._conn.is_open and self._ch.is_open):
+            raise HTTPException(status_code=503, detail="RabbitMQ worker not ready")
         try:
-            payload = json.loads(body_str)
+            self._conn.add_callback_threadsafe(lambda: self._ch.basic_ack(delivery_tag=delivery_tag, multiple=False))
+        except pika.exceptions.ConnectionWrongStateError:
+            raise HTTPException(status_code=409, detail="Lease channel closed; event will be redelivered")
+
+    def nack(self, delivery_tag: int, requeue: bool = True):
+        if not (self._conn and self._ch and self._conn.is_open and self._ch.is_open):
+            raise HTTPException(status_code=503, detail="RabbitMQ worker not ready")
+        try:
+            self._conn.add_callback_threadsafe(
+                lambda: self._ch.basic_nack(delivery_tag=delivery_tag, multiple=False, requeue=requeue)
+            )
+        except pika.exceptions.ConnectionWrongStateError:
+            raise HTTPException(status_code=409, detail="Lease channel closed; event will be redelivered")
+
+    def _on_message(self, ch, method, properties, body):
+        try:
+            received_at_utc = utc_now_iso()
+            bm = BufferedMessage(
+                delivery_tag=method.delivery_tag,
+                properties=properties,
+                body=body,
+                received_at_utc=received_at_utc,
+            )
+            with self._buffer_lock:
+                self._buffer.append(bm)
+
+            logger.info("Buffered message queue=%s deliveryTag=%s", self.queue, method.delivery_tag)
         except Exception:
-            payload = {"raw": body_str}
-    else:
-        payload = {"raw": body_str}
+            logger.exception("Failed buffering message; nack requeue=true")
+            try:
+                ch.basic_nack(delivery_tag=method.delivery_tag, multiple=False, requeue=True)
+            except Exception:
+                pass
 
-    # Prefer AMQP message_id if producer set it; else generate one.
-    msg_id = properties.message_id or str(uuid.uuid4())
+    def _run(self):
+        logger.info("Starting consumer worker queue=%s", self.queue)
+        while not self._stop.is_set():
+            connection = None
+            channel = None
+            try:
+                params = pika.URLParameters(RABBIT_URL)
+                params.heartbeat = RABBITMQ_HEARTBEAT
+                params.blocked_connection_timeout = RABBITMQ_BLOCKED_CONNECTION_TIMEOUT
+                params.socket_timeout = RABBITMQ_SOCKET_TIMEOUT
 
-    # Normalize to bus envelope schema
-    if isinstance(payload, dict):
-        envelope = normalize_to_bus_envelope(payload, properties)
-    else:
-        envelope = normalize_to_bus_envelope({"raw": payload}, properties)
+                connection = pika.BlockingConnection(params)
+                channel = connection.channel()
+                channel.basic_qos(prefetch_count=PREFETCH)
 
-    return msg_id, envelope
+                # Passive declare: fail fast if queue not present in client env
+                channel.queue_declare(queue=self.queue, passive=True)
+
+                self._conn = connection
+                self._ch = channel
+                self._ready.set()
+
+                channel.basic_consume(queue=self.queue, on_message_callback=self._on_message, auto_ack=False)
+                logger.info("Consuming queue=%s", self.queue)
+                channel.start_consuming()
+
+            except Exception:
+                logger.exception("Worker crashed queue=%s; reconnect in %ss", self.queue, CONSUMER_RECONNECT_DELAY)
+                self._ready.set()
+            finally:
+                try:
+                    if channel and channel.is_open:
+                        channel.close()
+                except Exception:
+                    pass
+                try:
+                    if connection and connection.is_open:
+                        connection.close()
+                except Exception:
+                    pass
+                self._conn = None
+                self._ch = None
+                time.sleep(CONSUMER_RECONNECT_DELAY)
+
+
+WORKERS_LOCK = threading.RLock()
+WORKERS: Dict[str, ConsumerWorker] = {}
+
+
+def get_worker(queue: str) -> ConsumerWorker:
+    with WORKERS_LOCK:
+        w = WORKERS.get(queue)
+        if w:
+            return w
+        w = ConsumerWorker(queue)
+        WORKERS[queue] = w
+        w.start()
+        return w
 
 
 # ----------------------------
@@ -292,12 +387,15 @@ def parse_message(body: bytes, properties: pika.BasicProperties) -> Tuple[str, D
 # ----------------------------
 @dataclass
 class PendingRecord:
+    queue: str
+    event_type: str
     delivery_tag: int
-    envelope: Dict[str, Any]
+    headers: Dict[str, Any]
+    raw_content: str
+    payload: Optional[Dict[str, Any]]
+    received_at_utc: str
     reserved_until_ms: Optional[int] = None
     batch_id: Optional[str] = None
-    event_type: str = "UnknownEvent"
-    epoch: int = 0  # consumer connection epoch at the time message was received
 
 
 pending: Dict[str, PendingRecord] = {}     # _id -> record
@@ -307,107 +405,39 @@ lock = threading.RLock()
 
 def purge_expired_leases() -> None:
     t = now_ms()
+    expired: List[Tuple[str, PendingRecord]] = []
     with lock:
-        for rec in pending.values():
+        for event_id, rec in list(pending.items()):
             if rec.reserved_until_ms is not None and rec.reserved_until_ms <= t:
-                rec.reserved_until_ms = None
-                rec.batch_id = None
+                expired.append((event_id, rec))
+                # remove from pending; will be requeued
+                pending.pop(event_id, None)
+                if rec.batch_id and rec.batch_id in batches:
+                    batches[rec.batch_id].discard(event_id)
 
+        # drop empty batches
+        for bid in list(batches.keys()):
+            if not batches[bid]:
+                batches.pop(bid, None)
 
-# ----------------------------
-# Rabbit consumer thread (reconnecting)
-# ----------------------------
-def rabbit_consumer_thread() -> None:
-    logger.info("Starting RabbitMQ consumer thread (reconnecting loop)")
-
-    while True:
-        connection = None
-        channel = None
-
+    # Requeue expired leases (nack requeue=true)
+    for event_id, rec in expired:
         try:
-            params = pika.URLParameters(RABBIT_URL)
-            params.heartbeat = RABBITMQ_HEARTBEAT
-            params.blocked_connection_timeout = RABBITMQ_BLOCKED_CONNECTION_TIMEOUT
-            params.socket_timeout = RABBITMQ_SOCKET_TIMEOUT
-
-            connection = pika.BlockingConnection(params)
-            channel = connection.channel()
-
-            # bump epoch on each successful connect
-            with lock:
-                channel_ref["epoch"] = int(channel_ref.get("epoch", 0)) + 1
-                epoch = channel_ref["epoch"]
-                channel_ref["connection"] = connection
-                channel_ref["channel"] = channel
-
-                # delivery_tags from previous channel are invalid after reconnect
-                pending.clear()
-                batches.clear()
-
-            logger.info("Connected to RabbitMQ (epoch=%s), queue=%s", epoch, QUEUE_NAME)
-
-            channel.queue_declare(queue=QUEUE_NAME, durable=True)
-            channel.basic_qos(prefetch_count=PREFETCH)
-
-            def on_message(ch, method, properties, body):
-                try:
-                    msg_id, envelope = parse_message(body, properties)
-                    event_type = extract_event_type(envelope)
-
-                    with lock:
-                        pending[msg_id] = PendingRecord(
-                            delivery_tag=method.delivery_tag,
-                            envelope=envelope,
-                            reserved_until_ms=None,
-                            batch_id=None,
-                            event_type=event_type,
-                            epoch=epoch,
-                        )
-
-                    logger.info(
-                        "Received message _id=%s type=%s deliveryTag=%s epoch=%s",
-                        msg_id, event_type, method.delivery_tag, epoch
-                    )
-                except Exception:
-                    logger.exception("Failed to parse message; nack requeue=false (DLQ if configured)")
-                    try:
-                        ch.basic_nack(delivery_tag=method.delivery_tag, multiple=False, requeue=False)
-                    except Exception:
-                        pass
-
-            channel.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message, auto_ack=False)
-
-            logger.info("Starting consume loop (epoch=%s)", epoch)
-            channel.start_consuming()
-
+            worker = get_worker(rec.queue)
+            worker.nack(rec.delivery_tag, requeue=True)
         except Exception:
-            logger.exception("Consumer loop crashed; will reconnect in %ss", CONSUMER_RECONNECT_DELAY)
-
-        finally:
-            # clear refs if they still point to this connection/channel
-            with lock:
-                if channel_ref.get("connection") is connection:
-                    channel_ref["connection"] = None
-                if channel_ref.get("channel") is channel:
-                    channel_ref["channel"] = None
-
-            try:
-                if channel and channel.is_open:
-                    channel.close()
-            except Exception:
-                pass
-            try:
-                if connection and connection.is_open:
-                    connection.close()
-            except Exception:
-                pass
-
-            time.sleep(CONSUMER_RECONNECT_DELAY)
+            # if cannot nack, it will eventually requeue on connection close
+            pass
 
 
-def start_consumer():
-    t = threading.Thread(target=rabbit_consumer_thread, daemon=True, name="rabbit-consumer")
-    t.start()
+# Lease janitor
+def lease_janitor_thread() -> None:
+    while True:
+        try:
+            purge_expired_leases()
+        except Exception:
+            logger.exception("Lease janitor error")
+        time.sleep(1)
 
 
 # ----------------------------
@@ -444,16 +474,24 @@ class NackRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class FailByIdRequest(BaseModel):
+    eventId: str
+    exceptionMessage: str
+    requeue: bool = True
+
+
 # ----------------------------
 # FastAPI app
 # ----------------------------
-app = FastAPI(title="RabbitMQ Facade (poll/ack)", version="1.2.0")
+app = FastAPI(title="RabbitMQ Facade (multi-queue poll/ack + audit)", version="2.0.0")
 
 
 @app.on_event("startup")
 def startup():
-    start_consumer()
-    logger.info("Facade startup complete. Queue=%s", QUEUE_NAME)
+    # Start lease janitor
+    t = threading.Thread(target=lease_janitor_thread, daemon=True, name="lease-janitor")
+    t.start()
+    logger.info("Facade startup complete. Multi-queue mode enabled.")
 
 
 # ----------------------------
@@ -462,67 +500,145 @@ def startup():
 @app.get("/health")
 def health():
     with lock:
+        by_queue: Dict[str, int] = {}
         by_type: Dict[str, int] = {}
         for rec in pending.values():
+            by_queue[rec.queue] = by_queue.get(rec.queue, 0) + 1
             by_type[rec.event_type] = by_type.get(rec.event_type, 0) + 1
 
-        conn = channel_ref.get("connection")
-        ch = channel_ref.get("channel")
-        epoch = channel_ref.get("epoch", 0)
-        consumer_state = {
-            "epoch": epoch,
-            "connectionOpen": bool(conn and getattr(conn, "is_open", False)),
-            "channelOpen": bool(ch and getattr(ch, "is_open", False)),
+    with WORKERS_LOCK:
+        workers_state = {
+            q: {
+                "threadAlive": w._thread.is_alive(),
+                "ready": w._ready.is_set(),
+                "buffered": len(w._buffer),
+            }
+            for q, w in WORKERS.items()
         }
 
-        return {"ok": True, "pending": len(pending), "byType": by_type, "consumer": consumer_state}
+    return {
+        "ok": True,
+        "pending": len(pending),
+        "byQueue": by_queue,
+        "byType": by_type,
+        "workers": workers_state,
+    }
 
 
-@app.get("/v1/events/users", response_model=None)
-def get_user_events(
+@app.get("/v1/events")
+def get_events(
+    queue: str = Query(..., description="RabbitMQ queue name to consume from"),
+    eventType: str = Query(..., description="Logical event type name (used for audit Name)"),
     limit: int = Query(default=100, ge=1, le=500),
-    leaseSeconds: int = Query(default=DEFAULT_LEASE_SECONDS, ge=5, le=300),
-    eventName: Optional[str] = Query(default="CuentaModificada"),
+    leaseSeconds: int = Query(default=DEFAULT_LEASE_SECONDS, ge=1, le=3600),
     includeData: bool = Query(default=True),
     _: None = Depends(require_api_key),
 ):
+    """
+    Queue-driven polling endpoint (new).
+    Returns a list of normalized items:
+      - _id for ack-by-id
+      - eventType, sourceQueue
+      - headers (canonical fields)
+      - payload (deserialized JSON object)
+      - rawContent (string)
+    """
     purge_expired_leases()
 
-    batch_id = "b_" + uuid.uuid4().hex[:8]
+    worker = get_worker(queue)
     lease_expires_ms = now_ms() + leaseSeconds * 1000
 
     results: List[Dict[str, Any]] = []
+    batch_id = "b_" + uuid.uuid4().hex[:8]
 
-    with lock:
-        for event_id, rec in pending.items():
-            if len(results) >= limit:
-                break
-            if rec.reserved_until_ms is not None:
-                continue
-            if eventName and rec.event_type != eventName:
-                continue
+    buffered = worker.pop_batch(limit)
 
-            rec.reserved_until_ms = lease_expires_ms
-            rec.batch_id = batch_id
+    for bm in buffered:
+        raw_text = bm.body.decode("utf-8", errors="replace")
+        headers = safe_headers(bm.properties)
+
+        payload: Optional[Dict[str, Any]] = None
+        try:
+            payload = json.loads(raw_text)
+            if not isinstance(payload, dict):
+                raise ValueError("Message JSON is not an object")
+        except Exception as e:
+            # Client requirement: audit deserialization error
+            key_for_audit = str(headers.get("key") or getattr(bm.properties, "message_id", None) or str(uuid.uuid4()))
+            try:
+                publish_audit_message(
+                    key=key_for_audit,
+                    name=eventType,
+                    sender=str(headers.get("application") or "UNKNOWN"),
+                    account_id=str(headers.get("accountId") or ""),
+                    content=raw_text,
+                    exception_message=f"JSON deserialization error: {e}",
+                )
+            except Exception:
+                logger.exception("Failed to publish audit (deserialization error)")
+
+            # Requeue by default (safe); adjust to requeue=False if DLQ is configured & desired
+            try:
+                worker.nack(bm.delivery_tag, requeue=True)
+            except Exception:
+                pass
+            continue
+
+        event_id = compute_event_id(
+            event_type=eventType,
+            headers=headers,
+            payload=payload,
+            received_at_utc=bm.received_at_utc,
+            properties=bm.properties,
+        )
+
+        rec = PendingRecord(
+            queue=queue,
+            event_type=eventType,
+            delivery_tag=bm.delivery_tag,
+            headers=headers,
+            raw_content=raw_text,
+            payload=payload,
+            received_at_utc=bm.received_at_utc,
+            reserved_until_ms=lease_expires_ms,
+            batch_id=batch_id,
+        )
+
+        with lock:
+            # Avoid clobber on duplicate event_id
+            if event_id in pending:
+                event_id = f"{event_id}:{uuid.uuid4()}"
+            pending[event_id] = rec
             batches.setdefault(batch_id, set()).add(event_id)
 
-            item: Dict[str, Any] = {
-                "_id": event_id,
-                "__NAME__": event_id,
-                "batchId": batch_id,
-                **rec.envelope,
-            }
+        item: Dict[str, Any] = {
+            "_id": event_id,
+            "__NAME__": event_id,  # compatibility with prior connector expectations
+            "batchId": batch_id,
+            "eventType": eventType,
+            "sourceQueue": queue,
+            "receivedAt": bm.received_at_utc,
+            "headers": {
+                "key": headers.get("key"),
+                "application": headers.get("application"),
+                "accountId": headers.get("accountId"),
+                "action": headers.get("action"),
+            },
+        }
+        if includeData:
+            item["data"] = payload
+        # Keep raw for audit traceability/debug
+        item["rawContent"] = raw_text
 
-            if includeData:
-                item["data"] = parse_content_json(rec.envelope)
-
-            results.append(item)
+        results.append(item)
 
     if not results:
         return Response(status_code=204)
 
-    logger.info("Issued batch=%s results=%d leaseSeconds=%d eventName=%s", batch_id, len(results), leaseSeconds, eventName)
+    logger.info("Issued batch=%s results=%d queue=%s eventType=%s leaseSeconds=%d",
+                batch_id, len(results), queue, eventType, leaseSeconds)
 
+    # Keep same “paging wrapper” style as /v1/events/users for connector compatibility
     return {
         "result": results,
         "resultCount": len(results),
@@ -533,8 +649,38 @@ def get_user_events(
     }
 
 
+@app.get("/v1/events/users", response_model=None)
+def get_user_events(
+    limit: int = Query(default=100, ge=1, le=500),
+    leaseSeconds: int = Query(default=DEFAULT_LEASE_SECONDS, ge=1, le=3600),
+    # old param kept for backward compatibility; used as eventType now
+    eventName: Optional[str] = Query(default=DEFAULT_EVENTTYPE_USERS),
+    includeData: bool = Query(default=True),
+    # NEW: allow specifying queue; default to CuentaModificada subscriber queue
+    queue: str = Query(default=DEFAULT_QUEUE_USERS),
+    _: None = Depends(require_api_key),
+):
+    """
+    Backwards compatible alias used by the existing connector.
+    In the new client model, selection is by queue, not filtering inside a shared queue.
+    """
+    return get_events(
+        queue=queue,
+        eventType=eventName or DEFAULT_EVENTTYPE_USERS,
+        limit=limit,
+        leaseSeconds=leaseSeconds,
+        includeData=includeData,
+        _=None,
+    )
+
+
 @app.post("/v1/publish")
 def publish_message(req: PublishRequest, _: None = Depends(require_api_key)):
+    """
+    Business publish helper (unchanged semantics):
+    - If exchange == "", publishes direct-to-queue (routingKey must be queue name)
+    - Otherwise publishes to exchange with routingKey
+    """
     try:
         ch = get_publish_channel()
 
@@ -546,7 +692,6 @@ def publish_message(req: PublishRequest, _: None = Depends(require_api_key)):
             headers=req.headers,
         )
 
-        # Default exchange: routingKey must be the queue name; declare for convenience
         if req.exchange == "":
             ch.queue_declare(queue=req.routingKey, durable=True)
 
@@ -564,109 +709,152 @@ def publish_message(req: PublishRequest, _: None = Depends(require_api_key)):
         raise
 
 
-@app.post("/v1/events/acks", response_model=AckResponse)
-def ack_events(req: AckRequest, _: None = Depends(require_api_key)):
-    ch = channel_ref.get("channel")
-    conn = channel_ref.get("connection")
-    current_epoch = channel_ref.get("epoch", 0)
-
-    if ch is None or conn is None or not conn.is_open or not ch.is_open:
-        raise HTTPException(status_code=503, detail="RabbitMQ consumer not ready")
-
-    acked: List[str] = []
-    ignored: List[str] = []
-    to_ack: List[int] = []
-
-    with lock:
-        for event_id in req.eventIds:
-            rec = pending.get(event_id)
-            if rec is None or rec.batch_id != req.batchId:
-                ignored.append(event_id)
-                continue
-            if rec.epoch != current_epoch:
-                pending.pop(event_id, None)
-                ignored.append(event_id)
-                continue
-
-            to_ack.append(rec.delivery_tag)
-            pending.pop(event_id, None)
-            acked.append(event_id)
-
-        batches.pop(req.batchId, None)
-
-    for dt in to_ack:
-        schedule_on_consumer_thread(lambda d=dt: ch.basic_ack(delivery_tag=d, multiple=False))
-
-    logger.info("ACK batch=%s acked=%d ignored=%d", req.batchId, len(acked), len(ignored))
-    return AckResponse(acked=acked, ignored=ignored)
-
-
 @app.post("/v1/events/ack-by-id")
 def ack_event_by_id(req: AckByIdRequest, _: None = Depends(require_api_key)):
-    ch = channel_ref.get("channel")
-    conn = channel_ref.get("connection")
-    current_epoch = channel_ref.get("epoch", 0)
-
-    if ch is None or conn is None or not conn.is_open or not ch.is_open:
-        raise HTTPException(status_code=503, detail="RabbitMQ consumer not ready")
-
+    """
+    ACK a single event by its _id, and publish success audit record.
+    Idempotent: if not found, return 404 (same as previous) OR you can change to ok.
+    """
     with lock:
         rec = pending.get(req.eventId)
         if rec is None:
             raise HTTPException(status_code=404, detail="Event not found or already ACKed")
 
-        # Can't ack stale delivery_tag after reconnect
-        if rec.epoch != current_epoch:
-            pending.pop(req.eventId, None)
-            raise HTTPException(status_code=409, detail="Stale lease (consumer reconnected); event will be redelivered")
+        # remove from pending first (so concurrent requests don’t double-ack)
+        pending.pop(req.eventId, None)
+        if rec.batch_id and rec.batch_id in batches:
+            batches[rec.batch_id].discard(req.eventId)
+            if not batches[rec.batch_id]:
+                batches.pop(rec.batch_id, None)
 
-        delivery_tag = rec.delivery_tag
-        batch_id = rec.batch_id
+    worker = get_worker(rec.queue)
+    worker.ack(rec.delivery_tag)
 
-    # Schedule ack outside lock; ensure open state first
-    if not conn.is_open or not ch.is_open:
-        raise HTTPException(status_code=409, detail="Lease channel closed; event will be redelivered")
+    # Publish success audit
+    try:
+        key_for_audit = str(rec.headers.get("key") or req.eventId)
+        publish_audit_message(
+            key=key_for_audit,
+            name=rec.event_type,
+            sender=str(rec.headers.get("application") or "UNKNOWN"),
+            account_id=str(rec.headers.get("accountId") or ""),
+            content=rec.raw_content,
+            exception_message=None,
+        )
+    except Exception:
+        logger.exception("Failed to publish audit (success)")
 
-    schedule_on_consumer_thread(lambda dt=delivery_tag: ch.basic_ack(delivery_tag=dt, multiple=False))
+    logger.info("ACK by id=%s queue=%s type=%s", req.eventId, rec.queue, rec.event_type)
+    return {"acked": req.eventId}
+
+
+@app.post("/v1/events/fail-by-id")
+def fail_event_by_id(req: FailByIdRequest, _: None = Depends(require_api_key)):
+    """
+    Mark processing failure:
+    - Publish audit with ExceptionMessage
+    - NACK the original message (requeue configurable)
+    """
+    with lock:
+        rec = pending.get(req.eventId)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Event not found or already completed")
+
+        pending.pop(req.eventId, None)
+        if rec.batch_id and rec.batch_id in batches:
+            batches[rec.batch_id].discard(req.eventId)
+            if not batches[rec.batch_id]:
+                batches.pop(rec.batch_id, None)
+
+    # Audit failure
+    try:
+        key_for_audit = str(rec.headers.get("key") or req.eventId)
+        publish_audit_message(
+            key=key_for_audit,
+            name=rec.event_type,
+            sender=str(rec.headers.get("application") or "UNKNOWN"),
+            account_id=str(rec.headers.get("accountId") or ""),
+            content=rec.raw_content,
+            exception_message=req.exceptionMessage,
+        )
+    except Exception:
+        logger.exception("Failed to publish audit (failure)")
+
+    worker = get_worker(rec.queue)
+    worker.nack(rec.delivery_tag, requeue=req.requeue)
+
+    logger.warning("FAIL by id=%s queue=%s type=%s requeue=%s", req.eventId, rec.queue, rec.event_type, req.requeue)
+    return {"failed": req.eventId, "requeued": req.requeue}
+
+
+@app.post("/v1/events/acks", response_model=AckResponse)
+def ack_events(req: AckRequest, _: None = Depends(require_api_key)):
+    """
+    Batch ACK endpoint kept for compatibility.
+    Will ACK only those events that belong to the provided batchId.
+    """
+    acked: List[str] = []
+    ignored: List[str] = []
+
+    # Group by queue for efficient ack calls
+    by_queue: Dict[str, List[Tuple[str, PendingRecord]]] = {}
 
     with lock:
-        pending.pop(req.eventId, None)
-        if batch_id and batch_id in batches:
-            batches[batch_id].discard(req.eventId)
-            if not batches[batch_id]:
-                batches.pop(batch_id, None)
+        for event_id in req.eventIds:
+            rec = pending.get(event_id)
+            if rec is None or rec.batch_id != req.batchId:
+                ignored.append(event_id)
+                continue
+            pending.pop(event_id, None)
+            acked.append(event_id)
+            by_queue.setdefault(rec.queue, []).append((event_id, rec))
 
-    logger.info("ACK by id=%s", req.eventId)
-    return {"acked": req.eventId}
+        batches.pop(req.batchId, None)
+
+    for queue, items in by_queue.items():
+        worker = get_worker(queue)
+        for event_id, rec in items:
+            worker.ack(rec.delivery_tag)
+            # success audit
+            try:
+                key_for_audit = str(rec.headers.get("key") or event_id)
+                publish_audit_message(
+                    key=key_for_audit,
+                    name=rec.event_type,
+                    sender=str(rec.headers.get("application") or "UNKNOWN"),
+                    account_id=str(rec.headers.get("accountId") or ""),
+                    content=rec.raw_content,
+                    exception_message=None,
+                )
+            except Exception:
+                logger.exception("Failed to publish audit (success) batch item")
+
+    logger.info("ACK batch=%s acked=%d ignored=%d", req.batchId, len(acked), len(ignored))
+    return AckResponse(acked=acked, ignored=ignored)
 
 
 @app.post("/v1/events/nacks")
 def nack_events(req: NackRequest, _: None = Depends(require_api_key)):
-    ch = channel_ref.get("channel")
-    conn = channel_ref.get("connection")
-    current_epoch = channel_ref.get("epoch", 0)
-
-    if ch is None or conn is None or not conn.is_open or not ch.is_open:
-        raise HTTPException(status_code=503, detail="RabbitMQ consumer not ready")
-
-    to_nack: List[Tuple[int, bool]] = []
+    """
+    Batch NACK endpoint kept for compatibility.
+    Does NOT publish audit (use /fail-by-id if you want ExceptionMessage).
+    """
+    to_nack: Dict[str, List[int]] = {}
 
     with lock:
         for event_id in req.eventIds:
             rec = pending.get(event_id)
             if rec is None or rec.batch_id != req.batchId:
                 continue
-            if rec.epoch != current_epoch:
-                pending.pop(event_id, None)
-                continue
-
-            to_nack.append((rec.delivery_tag, req.requeue))
             pending.pop(event_id, None)
+            to_nack.setdefault(rec.queue, []).append(rec.delivery_tag)
 
         batches.pop(req.batchId, None)
 
-    for dt, rq in to_nack:
-        schedule_on_consumer_thread(lambda d=dt, r=rq: ch.basic_nack(delivery_tag=d, multiple=False, requeue=r))
+    for queue, delivery_tags in to_nack.items():
+        worker = get_worker(queue)
+        for dt in delivery_tags:
+            worker.nack(dt, requeue=req.requeue)
 
     logger.warning("NACK batch=%s events=%d requeue=%s", req.batchId, len(req.eventIds), req.requeue)
     return {"ok": True}
@@ -675,6 +863,14 @@ def nack_events(req: NackRequest, _: None = Depends(require_api_key)):
 @app.on_event("shutdown")
 def shutdown():
     global publish_conn, publish_ch
+    # Stop workers (best effort)
+    with WORKERS_LOCK:
+        for w in WORKERS.values():
+            try:
+                w._stop.set()
+            except Exception:
+                pass
+
     with publish_lock:
         try:
             if publish_ch and publish_ch.is_open:

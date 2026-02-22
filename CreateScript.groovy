@@ -1,15 +1,12 @@
-// CreateScript.groovy (LEGACY-SHAPE PUBLISH)
+// CreateScript.groovy (PUBLISH - CLIENT BUS FORMAT)
 // Publishes: POST /v1/publish
-// Uses configuration.serviceAddress as base URL
-// Defaults routingKey from configuration.propertyBag.queueName
-// Transforms incoming envelope (eventName/data) into legacy bus shape (Name/Content string)
+// Message body is FLAT JSON payload (no legacy envelope)
+// Rabbit headers are passed through (publishHeaders preferred, headers fallback)
 
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.nio.charset.StandardCharsets
 import java.net.HttpURLConnection
-import java.time.OffsetDateTime
-import java.time.format.DateTimeFormatter
 
 import org.identityconnectors.framework.common.objects.AttributeUtil
 import org.identityconnectors.framework.common.objects.Uid
@@ -22,7 +19,7 @@ def getApiKey() {
     def apiKey = null
     gs.access({ chars -> apiKey = new String(chars) }
         as org.identityconnectors.common.security.GuardedString.Accessor)
-    return apiKey
+    return (apiKey ?: "").trim()
 }
 
 def httpPostJson(String urlStr, Map<String, String> headers, String jsonBody) {
@@ -65,26 +62,43 @@ def attrBoolean(String name) {
 }
 
 // --- configuration ---
-def baseUrl = (configuration.serviceAddress ?: "").toString().replaceAll("/+\$", "")
+def baseUrl = (configuration.serviceAddress ?: "").toString()
+while (baseUrl.endsWith("/")) {
+    baseUrl = baseUrl.substring(0, baseUrl.length() - 1)
+}
 if (!baseUrl) throw new IllegalStateException("configuration.serviceAddress is required")
 
 def apiKey = getApiKey()
+if (!apiKey) throw new IllegalStateException("API key is empty in configuration.password")
 
-def bag = configuration.propertyBag ?: [:]
-def defaultQueue = (bag.queueName ?: "")?.toString()
-def configuredEventName = (bag.eventName ?: "")?.toString()
+// propertyBag is unreliable in some builds; still use if present (backward compatibility)
+def bag = null
+try { bag = configuration.propertyBag } catch (ignored) { bag = null }
+def defaultQueue = ""
+try {
+    if (bag instanceof Map && bag.queueName != null) defaultQueue = bag.queueName.toString()
+} catch (ignored) { defaultQueue = "" }
 
 // --- read incoming attributes ---
 def routingKey = (attrString("routingKey") ?: defaultQueue ?: "")?.toString()
-if (!routingKey) throw new IllegalArgumentException("routingKey is required")
+if (!routingKey) throw new IllegalArgumentException("routingKey is required (attribute routingKey or configuration.propertyBag.queueName)")
 
-def exchange    = (attrString("exchange") ?: "")
-def contentType = (attrString("contentType") ?: "application/json")
+def exchange    = (attrString("exchange") ?: "")?.toString()
+def contentType = (attrString("contentType") ?: "application/json")?.toString()
 
 def persistent = attrBoolean("persistent")
 persistent = (persistent == null ? true : persistent)
 
-// accept payload OR data
+// optional messageId (used by facade as AMQP message_id)
+def messageId = (attrString("messageId") ?: "")?.toString()
+if (!messageId) {
+    def ph = attrValue("publishHeaders")
+    if (ph instanceof Map && ph.key != null) {
+        messageId = ph.key.toString()
+    }
+}
+
+// accept payload OR data (flat JSON object)
 def incoming = attrValue("payload")
 if (incoming == null) incoming = attrValue("data")
 if (incoming == null) throw new IllegalArgumentException("payload (or data) is required")
@@ -94,66 +108,33 @@ if (incoming instanceof String) {
     try { incoming = new JsonSlurper().parseText(incoming as String) } catch (Exception ignore) { }
 }
 
-// must be a Map to transform
+// must be a Map/object
 if (!(incoming instanceof Map)) {
     throw new IllegalArgumentException("payload/data must be an object (Map)")
 }
-def inMap = (Map) incoming
+def payloadMap = (Map) incoming
 
-// --- derive event name (what facade expects as payload.Name) ---
-def derivedEventName =
-    (inMap.eventName ?: inMap.EventName ?: inMap.Name ?: inMap.name ?: inMap.type ?: inMap.Type ?: configuredEventName)
-
-if (!derivedEventName) {
-    throw new IllegalArgumentException("eventName is required (payload.eventName or configuration.propertyBag.eventName)")
+// headers: publishHeaders preferred, fallback to headers
+def publishHeaders = attrValue("publishHeaders")
+if (!(publishHeaders instanceof Map)) {
+    publishHeaders = attrValue("headers")
 }
-derivedEventName = derivedEventName.toString()
-
-def nowIso = OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
-
-// --- build legacy bus payload ---
-def legacyPayload = [:]
-
-// Keep provided legacy fields, but normalize blanks
-legacyPayload.Action      = ((inMap.Action ?: "UPDATE")?.toString() ?: "UPDATE")
-legacyPayload.DateTime    = ((inMap.DateTime ?: inMap.timestamp ?: nowIso)?.toString() ?: nowIso)
-legacyPayload.Key         = ((inMap.Key ?: inMap.eventId ?: java.util.UUID.randomUUID().toString())?.toString())
-legacyPayload.Name        = ((inMap.Name?.toString()?.trim()) ? inMap.Name.toString() : derivedEventName)
-legacyPayload.Application = ((inMap.Application ?: "PingOneAIC")?.toString() ?: "PingOneAIC")
-legacyPayload.Sender      = ((inMap.Sender ?: "PingOneAIC")?.toString() ?: "PingOneAIC")
-legacyPayload.AccountId   = ((inMap.AccountId ?: (inMap.data instanceof Map ? (inMap.data.idAlumno ?: inMap.data.AccountId) : null) ?: "unknown")?.toString() ?: "unknown")
-
-// Content must be a STRING containing JSON
-def contentObj = inMap.Content
-if (contentObj == null) {
-    if (inMap.data instanceof Map) {
-        contentObj = inMap.data
-    } else {
-        def tmp = new LinkedHashMap(inMap)
-        ["eventName","EventName","timestamp","eventId","source","type","Type"].each { tmp.remove(it) }
-        contentObj = tmp
+if (publishHeaders != null && !(publishHeaders instanceof Map)) {
+    if (publishHeaders instanceof String) {
+        try { publishHeaders = new JsonSlurper().parseText(publishHeaders as String) } catch (ignored) { }
     }
 }
 
-if (contentObj instanceof String) {
-    legacyPayload.Content = (String) contentObj
-} else {
-    legacyPayload.Content = JsonOutput.toJson(contentObj)
-}
-
-// Optional: preserve batchId if present
-if (inMap.batchId != null) legacyPayload.batchId = inMap.batchId
-
+// build facade request
 def req = [
     exchange    : exchange,
     routingKey  : routingKey,
-    payload     : legacyPayload,
+    payload     : payloadMap,
     contentType : contentType,
     persistent  : persistent
 ]
-
-def headersVal = attrValue("headers")
-if (headersVal != null) req.headers = headersVal
+if (messageId) req.messageId = messageId
+if (publishHeaders instanceof Map) req.headers = publishHeaders
 
 def url = "${baseUrl}/v1/publish"
 httpPostJson(url, [
@@ -161,4 +142,6 @@ httpPostJson(url, [
     "Accept": "application/json"
 ], JsonOutput.toJson(req))
 
-return new Uid(java.util.UUID.randomUUID().toString())
+// Return UID: prefer messageId if available
+def returnedId = (messageId ?: java.util.UUID.randomUUID().toString())
+return new Uid(returnedId)
